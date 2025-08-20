@@ -2,7 +2,7 @@
 // ============ CONFIG ============
 
 // TODO(you): ВСТАВ СЮДИ GitHub доступ (ПРЯМО В КОДІ, як просив)
-const GITHUB_TOKEN = "PUT_YOUR_GITHUB_PAT_HERE";                 // <— твій GitHub Personal Access Token (repo scope)
+const GITHUB_TOKEN = "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";                 // <— твій GitHub Personal Access Token (repo scope)
 const GITHUB_OWNER = "Yalloma100";         // <— власник репозиторію
 const GITHUB_REPO  = "BDBotRead";         // <— назва репозиторію, де буде "БД"
 
