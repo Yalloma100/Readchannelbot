@@ -18,8 +18,8 @@ const ADMIN_ID = 6133407632; // твій ID з попереднього коду
 // Telegram налаштування з ENV (безпечно зберігати на Render)
 // Обов'язково заповни в Render -> Environment:
 const BOT_TOKEN = "8285002916:AAHZJXjZgT1G9RxV2bjqLgGnaC73iDWhKT4";   // BotFather token
-const API_ID = 17349;
-const API_HASH = "344583e45741c457fe1862106095a5eb";
+const API_ID = 27340376;
+const API_HASH = "d0e2e0d908496af978537c1ac918bdab";
 
 if (!BOT_TOKEN || !API_ID || !API_HASH) {
   console.error("❌ Set BOT_TOKEN, API_ID, API_HASH env vars!");
