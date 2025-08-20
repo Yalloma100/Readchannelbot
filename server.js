@@ -1,22 +1,22 @@
 // server.js
 // ============ CONFIG ============
+import { OpenAI } from "openai";
 
-// TODO(you): ВСТАВ СЮДИ GitHub доступ (ПРЯМО В КОДІ, як просив)
+// TODO(you): ВСТАВ СЮДИ OpenAI API ключ
+const OPENAI_API_KEY = "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"; // <— ВСТАВ СВІЙ КЛЮЧ
+
+// GitHub доступ (ПРЯМО В КОДІ, як просив)
 const GITHUB_TOKEN = "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";                 // <— твій GitHub Personal Access Token (repo scope)
 const GITHUB_OWNER = "Yalloma100";         // <— власник репозиторію
 const GITHUB_REPO  = "BDBotRead";         // <— назва репозиторію, де буде "БД"
 
-// Файли "БД" в репозиторії:
-const FILE_ALLOW_USERS = "allow-users.json";
-const FILE_EXCLUDED    = "excluded-channels.json";
-// Сесії зберігаємо у папці "sessions/<userId>.session.json"
-const SESSIONS_DIR     = "sessions";
+// Єдиний файл "БД" в репозиторії:
+const FILE_USERS_DB = "users.json";
 
-// ADMIN (має повні права навіть без allow-list):
-const ADMIN_ID = 6133407632; // твій ID з попереднього коду
+// ADMIN (має повні права)
+const ADMIN_ID = 6133407632; // твій ID
 
 // Telegram налаштування з ENV (безпечно зберігати на Render)
-// Обов'язково заповни в Render -> Environment:
 const BOT_TOKEN = "8285002916:AAHZJXjZgT1G9RxV2bjqLgGnaC73iDWhKT4";   // BotFather token
 const API_ID = 27340376;
 const API_HASH = "d0e2e0d908496af978537c1ac918bdab";
@@ -24,6 +24,9 @@ const API_HASH = "d0e2e0d908496af978537c1ac918bdab";
 if (!BOT_TOKEN || !API_ID || !API_HASH) {
   console.error("❌ Set BOT_TOKEN, API_ID, API_HASH env vars!");
   process.exit(1);
+}
+if (OPENAI_API_KEY === "YOUR_OPENAI_API_KEY_HERE") {
+    console.warn("⚠️ OpenAI API Key is not set! Reading function will fail.");
 }
 
 // ============ IMPORTS ============
@@ -39,21 +42,20 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 
-// GitHub client
+// Clients
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
+const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
 
-// Примітивне збереження станів діалогу авторизації (в пам'яті процесу)
-const authState = new Map();
+// Зберігання станів діалогу в пам'яті
+const userState = new Map();
 /*
-  authState[userId] = {
-    step: "await_phone" | "await_code" | "await_2fa" | null,
-    phone: string | null,
-    codeResolver: function | null,
-    passResolver: function | null
+  userState[userId] = {
+    step: "awaiting_phone" | "awaiting_code" | "awaiting_2fa" | "awaiting_exclusion_manual" | "managing_exclusions_list"
+    data: { ... } // Додаткові дані для контексту
   }
 */
 
-// ============ GitHub HELPERS ============
+// ============ GitHub & DATA HELPERS ============
 async function ghGetFile(path) {
   try {
     const { data } = await octokit.repos.getContent({
@@ -100,350 +102,639 @@ async function ghWriteJson(path, obj, message) {
   await ghPutFile(path, text, message);
 }
 
-// ensure core db files exist
-async function ensureDbFiles() {
-  const allow = await ghReadJson(FILE_ALLOW_USERS, null);
-  if (!allow) {
-    await ghWriteJson(FILE_ALLOW_USERS, [], "init allow-users.json");
-  }
-  const excluded = await ghReadJson(FILE_EXCLUDED, null);
-  if (!excluded) {
-    await ghWriteJson(FILE_EXCLUDED, {}, "init excluded-channels.json");
+async function ensureDbFile() {
+  const db = await ghReadJson(FILE_USERS_DB, null);
+  if (db === null) {
+    await ghWriteJson(FILE_USERS_DB, {}, "init users.json database");
   }
 }
 
-// Session helpers
-async function getUserSessionString(userId) {
-  const path = `${SESSIONS_DIR}/${userId}.session.json`;
-  const data = await ghReadJson(path, null);
-  return data?.session || null;
-}
-async function saveUserSessionString(userId, sessionString) {
-  const path = `${SESSIONS_DIR}/${userId}.session.json`;
-  await ghWriteJson(path, { session: sessionString }, `save session for ${userId}`);
+async function getAllUsersData() {
+    return await ghReadJson(FILE_USERS_DB, {});
 }
 
-// ============ ACCESS CONTROL ============
-async function isAllowed(userId) {
-  if (String(userId) === String(ADMIN_ID)) return true;
-  const list = await ghReadJson(FILE_ALLOW_USERS, []);
-  return list.map(String).includes(String(userId));
+async function getUserData(userId) {
+    const allData = await getAllUsersData();
+    if (!allData[userId]) {
+        return { accounts: [] };
+    }
+    return allData[userId];
 }
 
-async function addAllowed(userIdToAdd) {
-  const list = await ghReadJson(FILE_ALLOW_USERS, []);
-  if (!list.includes(userIdToAdd)) {
-    list.push(userIdToAdd);
-    await ghWriteJson(FILE_ALLOW_USERS, list, `add allowed user ${userIdToAdd}`);
-  }
+async function saveUserData(userId, data) {
+    const allData = await getAllUsersData();
+    allData[String(userId)] = data;
+    await ghWriteJson(FILE_USERS_DB, allData, `Update data for user ${userId}`);
 }
 
-async function getExcludedIds(userId) {
-  const map = await ghReadJson(FILE_EXCLUDED, {});
-  const arr = map[String(userId)];
-  return Array.isArray(arr) ? arr : [];
-}
-
-async function setExcludedIds(userId, ids) {
-  const map = await ghReadJson(FILE_EXCLUDED, {});
-  map[String(userId)] = ids;
-  await ghWriteJson(FILE_EXCLUDED, map, `update excluded for ${userId}`);
-}
 
 // ============ TELEGRAM BOT HELPERS ============
 async function sendText(chat_id, text, extra = {}) {
-  await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id, text, parse_mode: "HTML", ...extra });
+  try {
+    const response = await axios.post(`${TELEGRAM_API}/sendMessage`, { chat_id, text, parse_mode: "HTML", ...extra });
+    return response.data.result; // Повертаємо об'єкт повідомлення
+  } catch (error) {
+    console.error("Send message error:", error.response?.data || error.message);
+    return null;
+  }
+}
+
+async function editText(chat_id, message_id, text, extra = {}) {
+    try {
+        await axios.post(`${TELEGRAM_API}/editMessageText`, { chat_id, message_id, text, parse_mode: "HTML", ...extra });
+    } catch (error) {
+        // Ігноруємо помилки, якщо повідомлення не змінилося
+        if (!error.response?.data?.description.includes("message is not modified")) {
+            console.error("Edit message error:", error.response?.data || error.message);
+        }
+    }
+}
+
+
+async function deleteMessage(chat_id, message_id) {
+    try {
+        await axios.post(`${TELEGRAM_API}/deleteMessage`, { chat_id, message_id });
+    } catch (error) {
+        // Ігноруємо, якщо повідомлення вже видалено
+    }
 }
 
 function escapeHtml(s) {
   return String(s).replace(/[<>&]/g, c => ({ "<": "&lt;", ">": "&gt;", "&": "&amp;" }[c]));
 }
 
-// ============ AUTH FLOW (GramJS with chat-driven prompts) ============
-function getOrCreateAuth(userId) {
-  if (!authState.has(userId)) {
-    authState.set(userId, {
-      step: null, phone: null,
-      codeResolver: null,
-      passResolver: null
+// ============ AUTH FLOW (GramJS) ============
+
+async function startInteractiveLogin(userId, chatId, phone) {
+    const state = userState.get(userId) || {};
+    state.step = 'interactive_login';
+    state.data = { ...state.data, phone, codeResolver: null, passResolver: null };
+    userState.set(userId, state);
+
+    const client = new TelegramClient(new StringSession(""), API_ID, API_HASH, { connectionRetries: 5 });
+
+    await client.start({
+        phoneNumber: async () => phone,
+        phoneCode: async () => {
+            state.step = "awaiting_code";
+            await sendText(chatId, "Надішли код, який надійшов у Telegram або SMS.\n<b>Формат: 1-2-3-4-5</b> (кожна цифра через тире).");
+            return new Promise(resolve => {
+                state.data.codeResolver = resolve;
+                userState.set(userId, state);
+            });
+        },
+        password: async () => {
+            state.step = "awaiting_2fa";
+            await sendText(chatId, "Введи 2FA пароль (якщо він є). Якщо пароля немає, напиши: <code>нема</code>");
+            return new Promise(resolve => {
+                state.data.passResolver = resolve;
+                userState.set(userId, state);
+            });
+        },
+        onError: (e) => console.error(`Auth error for ${phone}:`, e),
     });
+
+    const sessionString = client.session.save();
+    
+    const userData = await getUserData(userId);
+    const accountExists = userData.accounts.some(acc => acc.phone === phone);
+    if (!accountExists) {
+        userData.accounts.push({
+            phone: phone,
+            session: sessionString,
+            excluded_channels: [],
+        });
+        await saveUserData(userId, userData);
+    }
+    
+    userState.delete(userId);
+    await sendText(chatId, `✅ Акаунт ${phone} успішно додано! Можете використовувати /read.`);
+}
+
+async function connectWithSession(sessionString) {
+  if (!sessionString) return null;
+  const client = new TelegramClient(new StringSession(sessionString), API_ID, API_HASH, { connectionRetries: 5 });
+  try {
+    await client.connect();
+    return client;
+  } catch (e) {
+    console.error("Failed to connect with session:", e);
+    return null;
   }
-  return authState.get(userId);
 }
 
-function waitForCode(userId) {
-  const state = getOrCreateAuth(userId);
-  return new Promise(resolve => { state.codeResolver = resolve; });
-}
-function waitForPass(userId) {
-  const state = getOrCreateAuth(userId);
-  return new Promise(resolve => { state.passResolver = resolve; });
-}
+// ============ COMMANDS & LOGIC ============
 
-async function startInteractiveLogin(userId, chatId) {
-  const state = getOrCreateAuth(userId);
-  // створюємо клієнта з пустою або існуючою сесією
-  const stringSession = new StringSession(""); // нова сесія
-  const client = new TelegramClient(stringSession, API_ID, API_HASH, { connectionRetries: 5 });
-
-  // CALLBACK-и читають значення з state та з чату
-  const phoneNumberCb = async () => state.phone;
-  const phoneCodeCb  = async () => {
-    state.step = "await_code";
-    await sendText(chatId, "Надішли код з Telegram/SMS (тільки цифри).");
-    const code = await waitForCode(userId);
-    return code;
-  };
-  const passwordCb   = async () => {
-    state.step = "await_2fa";
-    await sendText(chatId, "Введи 2FA пароль (якщо увімкнений). Якщо немає — напиши «нема».");
-    const pwd = await waitForPass(userId);
-    if (pwd.trim().toLowerCase() === "нема") return "";
-    return pwd;
-  };
-
-  await client.start({
-    phoneNumber: phoneNumberCb,
-    phoneCode: phoneCodeCb,
-    password: passwordCb,
-    onError: (e) => console.error("auth error:", e)
-  });
-
-  // Зберігаємо сесію до GitHub
-  const sess = client.session.save();
-  await saveUserSessionString(userId, sess);
-
-  // Прибираємо стан
-  state.step = null;
-  state.phone = null;
-  state.codeResolver = null;
-  state.passResolver = null;
-
-  await sendText(chatId, "✅ Авторизацію завершено. Можеш використовувати /read");
-}
-
-// Підключення по збереженій сесії
-async function connectWithSession(userId) {
-  const sess = await getUserSessionString(userId);
-  if (!sess) return null;
-  const client = new TelegramClient(new StringSession(sess), API_ID, API_HASH, { connectionRetries: 5 });
-  await client.connect();
-  return client;
-}
-
-// ============ COMMANDS ============
 async function cmdStart(msg) {
-  const userId = msg.from.id;
-  const chatId = msg.chat.id;
-
-  // Access control
-  if (!(await isAllowed(userId))) {
-    await sendText(chatId, "⛔ Доступ заборонено. Попроси адміна додати тебе командою /add <id>.");
-    return;
-  }
-
-  // Якщо вже є сесія — просто підтвердимо
-  const existing = await getUserSessionString(userId);
-  if (existing) {
-    await sendText(chatId, "✅ Сесія вже є. Використовуй /read, щоб отримати список каналів.");
-    return;
-  }
-
-  // Починаємо авторизацію
-  const state = getOrCreateAuth(userId);
-  state.step = "await_phone";
-  await sendText(chatId, "Введи номер телефону у форматі +380XXXXXXXXX");
-
-  // Далі чат-обробник зловить наступні повідомлення (див. нижче), і як тільки буде phone→code→password, ми викличемо startInteractiveLogin
-}
-
-async function cmdAdd(msg, args) {
-  const fromId = msg.from.id;
-  const chatId = msg.chat.id;
-  if (String(fromId) !== String(ADMIN_ID)) {
-    await sendText(chatId, "⛔ Команда доступна тільки адміну.");
-    return;
-  }
-  const toAdd = (args || "").trim();
-  if (!/^\d+$/.test(toAdd)) {
-    await sendText(chatId, "Використання: /add <user_id>");
-    return;
-  }
-  await addAllowed(Number(toAdd));
-  await sendText(chatId, `✅ Додано користувача ${toAdd} до allow-list.`);
+    const chatId = msg.chat.id;
+    const text = "👋 Вітаю! Цей бот допоможе тобі аналізувати непрочитані повідомлення у твоїх Telegram-каналах.\n\n" +
+                 "Щоб почати, додай свій акаунт.";
+    const keyboard = {
+        inline_keyboard: [
+            [{ text: "➕ Додати акаунт", callback_data: "add_account_start" }]
+        ]
+    };
+    await sendText(chatId, text, { reply_markup: keyboard });
 }
 
 async function cmdRead(msg) {
-  const userId = msg.from.id;
-  const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const chatId = msg.chat.id;
+    const userData = await getUserData(userId);
 
-  if (!(await isAllowed(userId))) {
-    await sendText(chatId, "⛔ Доступ заборонено.");
-    return;
-  }
-
-  const client = await connectWithSession(userId);
-  if (!client) {
-    await sendText(chatId, "⚠️ Немає сесії. Спочатку /start і пройди авторизацію.");
-    return;
-  }
-
-  const excludedIds = await getExcludedIds(userId);
-
-  // Отримуємо діалоги (канали)
-  const dialogs = await client.getDialogs({ limit: 100 }); // за потреби збільшиш/зробиш пагінацію
-  const channels = dialogs.filter(d => d.isChannel);
-
-  let total = 0, unreadChannels = 0, readChannels = 0;
-
-  const lines = [];
-  for (const d of channels) {
-    const ent = d.entity;
-    // Пропускаємо, якщо в excluded
-    const peerId = ent?.id?.toString?.() || "";
-    if (excludedIds.includes(peerId)) continue;
-
-    total++;
-    const title = ent?.title || ent?.username || "Без назви";
-    const username = ent?.username;
-    const link = username ? `https://t.me/${username}` : "(приватний канал)";
-    const unread = d.unreadCount || 0;
-
-    if (unread > 0) unreadChannels++; else readChannels++;
-
-    lines.push(
-      `• <b>${escapeHtml(title)}</b>\n   ${username ? `<a href="${link}">${link}</a>` : link}\n   Непрочитані: <b>${unread}</b>`
-    );
-  }
-
-  const header =
-    `Каналів загалом: <b>${total}</b>\n` +
-    `Прочитані: <b>${readChannels}</b>\n` +
-    `Непрочитані: <b>${unreadChannels}</b>\n\n`;
-
-  const text = header + (lines.length ? lines.join("\n\n") : "Немає каналів (або всі у виключеннях).");
-  // Telegram має ліміт 4096 символів у повідомленні — можна дробити:
-  if (text.length <= 4000) {
-    await sendText(chatId, text);
-  } else {
-    // Розбиваємо
-    await sendText(chatId, header);
-    let chunk = "";
-    for (const line of lines) {
-      if ((chunk + "\n\n" + line).length > 3800) {
-        await sendText(chatId, chunk);
-        chunk = line;
-      } else {
-        chunk = chunk ? chunk + "\n\n" + line : line;
-      }
+    if (!userData.accounts || userData.accounts.length === 0) {
+        await sendText(chatId, "У вас ще немає доданих акаунтів. Скористайтесь командою /start, щоб додати перший.");
+        return;
     }
-    if (chunk) await sendText(chatId, chunk);
-  }
+
+    if (userData.accounts.length === 1) {
+        await showAccountStats(userId, chatId, null, userData.accounts[0].phone);
+    } else {
+        const buttons = userData.accounts.map(acc => ([{
+            text: `📱 ${acc.phone}`,
+            callback_data: `select_account:${acc.phone}`
+        }]));
+        await sendText(chatId, "Оберіть акаунт, з яким будемо працювати:", {
+            reply_markup: { inline_keyboard: buttons }
+        });
+    }
 }
 
-// Додатково: команди для excluded (опційно, щоб було чим керувати)
-async function cmdExclude(msg, args) {
-  const userId = msg.from.id;
-  const chatId = msg.chat.id;
-  if (!(await isAllowed(userId))) return sendText(chatId, "⛔ Доступ заборонено.");
+async function cmdTransfer(msg, args) {
+    const fromId = msg.from.id;
+    const chatId = msg.chat.id;
 
-  // /exclude add <channelId>  або  /exclude remove <channelId>  або  /exclude list
-  const [action, id] = (args || "").trim().split(/\s+/);
-  const ids = await getExcludedIds(userId);
+    if (String(fromId) !== String(ADMIN_ID)) {
+        await sendText(chatId, "⛔ Команда доступна тільки адміну.");
+        return;
+    }
 
-  if (action === "list") {
-    return sendText(chatId, `Excluded IDs: ${ids.length ? ids.join(", ") : "(порожньо)"}`);
-  }
-  if (!["add", "remove"].includes(action) || !/^\d+$/.test(id || "")) {
-    return sendText(chatId, "Використання: /exclude list | /exclude add <channelId> | /exclude remove <channelId>");
-  }
-  const cid = String(id);
-  if (action === "add") {
-    if (!ids.includes(cid)) ids.push(cid);
-    await setExcludedIds(userId, ids);
-    return sendText(chatId, `✅ Додано до виключень: ${cid}`);
-  } else {
-    const idx = ids.indexOf(cid);
-    if (idx >= 0) ids.splice(idx, 1);
-    await setExcludedIds(userId, ids);
-    return sendText(chatId, `✅ Прибрано з виключень: ${cid}`);
-  }
+    const params = (args || "").split(" ");
+    if (params.length !== 3) {
+        await sendText(chatId, "Використання: <code>/transfer &lt;source_user_id&gt; &lt;phone_number&gt; &lt;target_user_id&gt;</code>");
+        return;
+    }
+
+    const [sourceId, phone, targetId] = params;
+
+    if (!/^\d+$/.test(sourceId) || !/^\+?\d{10,15}$/.test(phone) || !/^\d+$/.test(targetId)) {
+        await sendText(chatId, "Невірний формат ID або номера телефону.");
+        return;
+    }
+
+    const allData = await getAllUsersData();
+    
+    if (!allData[sourceId] || !allData[sourceId].accounts) {
+        await sendText(chatId, `❌ У користувача ${sourceId} немає акаунтів.`);
+        return;
+    }
+
+    const accountIndex = allData[sourceId].accounts.findIndex(acc => acc.phone === phone);
+    if (accountIndex === -1) {
+        await sendText(chatId, `❌ Акаунт з номером ${phone} не знайдено у користувача ${sourceId}.`);
+        return;
+    }
+
+    const [accountToTransfer] = allData[sourceId].accounts.splice(accountIndex, 1);
+
+    if (!allData[targetId]) {
+        allData[targetId] = { accounts: [] };
+    }
+    // Перевірка, чи такий акаунт вже існує у цільового користувача
+    if(allData[targetId].accounts.some(acc => acc.phone === phone)) {
+        await sendText(chatId, `⚠️ Користувач ${targetId} вже має акаунт ${phone}. Передачу скасовано.`);
+        return;
+    }
+
+    allData[targetId].accounts.push(accountToTransfer);
+
+    await ghWriteJson(FILE_USERS_DB, allData, `Transfer ${phone} from ${sourceId} to ${targetId} by admin`);
+    await sendText(chatId, `✅ Сесію для ${phone} успішно перенесено від ${sourceId} до ${targetId}.`);
 }
 
 // ============ WEBHOOK HANDLER ============
 app.post("/webhook", async (req, res) => {
-  try {
-    const update = req.body;
-    if (update.message) {
-      const msg = update.message;
-      const chatId = msg.chat.id;
-      const userId = msg.from.id;
-      const text = (msg.text || "").trim();
+    try {
+        const update = req.body;
 
-      // ROUTING
-      if (text.startsWith("/start")) {
-        await cmdStart(msg);
-      } else if (text.startsWith("/add")) {
-        const args = text.replace("/add", "").trim();
-        await cmdAdd(msg, args);
-      } else if (text.startsWith("/read")) {
-        await cmdRead(msg);
-      } else if (text.startsWith("/exclude")) {
-        const args = text.replace("/exclude", "").trim();
-        await cmdExclude(msg, args);
-      } else {
-        // Обробка кроків авторизації (номер/код/пароль)
-        const state = getOrCreateAuth(userId);
-        if (state.step === "await_phone") {
-          if (!/^\+?\d{10,15}$/.test(text)) {
-            await sendText(chatId, "Невірний формат. Приклад: +380XXXXXXXXX");
-          } else {
-            state.phone = text;
-            await sendText(chatId, "Окей, надсилаю код… Зачекай повідомлення про введення коду.");
-            // Запускаємо interactive login (він сам запитає код та 2FA через наші callback-и)
-            startInteractiveLogin(userId, chatId).catch(async (e) => {
-              console.error(e);
-              await sendText(chatId, "❌ Помилка авторизації. Спробуй ще раз /start");
-              state.step = null;
-            });
-          }
-        } else if (state.step === "await_code" && state.codeResolver) {
-          const code = text.replace(/\D/g, "");
-          state.codeResolver(code);
-          state.codeResolver = null;
-        } else if (state.step === "await_2fa" && state.passResolver) {
-          state.passResolver(text);
-          state.passResolver = null;
-        } else {
-          // Нічого: або ігноруємо, або підкажемо команди
-          await sendText(chatId, "Команди: /start, /read, /add (адмін), /exclude");
+        if (update.message) {
+            await handleMessage(update.message);
+        } else if (update.callback_query) {
+            await handleCallbackQuery(update.callback_query);
         }
-      }
-    }
 
-    res.sendStatus(200);
-  } catch (e) {
-    console.error(e);
-    res.sendStatus(200);
-  }
+    } catch (e) {
+        console.error("Webhook top-level error:", e);
+    } finally {
+        res.sendStatus(200);
+    }
 });
 
-// healthchecks + optional GET for /webhook (щоб UptimeRobot не плутався)
+async function handleMessage(msg) {
+    const chatId = msg.chat.id;
+    const userId = msg.from.id;
+    const text = (msg.text || "").trim();
+    const state = userState.get(userId);
+
+    // 1. Обробка команд
+    if (text.startsWith("/")) {
+        userState.delete(userId); // Скидаємо стан при будь-якій команді
+        const [command, args] = text.split(/ (.*)/s);
+        switch (command) {
+            case '/start': return cmdStart(msg);
+            case '/read': return cmdRead(msg);
+            case '/transfer': return cmdTransfer(msg, args);
+            default:
+                await sendText(chatId, "Невідома команда. Доступні команди: /start, /read.");
+        }
+        return;
+    }
+
+    // 2. Обробка станів
+    if (!state) return;
+
+    switch (state.step) {
+        case 'awaiting_phone':
+            if (!/^\+?\d{10,15}$/.test(text)) {
+                await sendText(chatId, "Невірний формат. Приклад: +380XXXXXXXXX");
+                return;
+            }
+            const userData = await getUserData(userId);
+            if (userData.accounts.some(acc => acc.phone === text)) {
+                await sendText(chatId, "Такий акаунт вже додано. Ви не можете додати його знову.");
+                userState.delete(userId);
+                return;
+            }
+            await sendText(chatId, "Добре, ініціюю вхід... Зачекайте на наступне повідомлення.");
+            startInteractiveLogin(userId, chatId, text).catch(async e => {
+                console.error(e);
+                await sendText(chatId, "❌ Помилка авторизації. Можливо, невірний номер або інша проблема. Спробуйте знову через /start.");
+                userState.delete(userId);
+            });
+            break;
+
+        case 'awaiting_code':
+            if (state.data?.codeResolver) {
+                const code = text.replace(/-/g, ""); // Видаляємо тире
+                if (!/^\d+$/.test(code)) {
+                    await sendText(chatId, "Код повинен містити тільки цифри та тире. Спробуйте ще раз.");
+                    return;
+                }
+                state.data.codeResolver(code);
+            }
+            break;
+
+        case 'awaiting_2fa':
+            if (state.data?.passResolver) {
+                const pass = text.toLowerCase() === 'нема' ? '' : text;
+                state.data.passResolver(pass);
+            }
+            break;
+
+        case 'managing_exclusions_list':
+            const { phone, channels } = state.data;
+            if (text.toLowerCase() === 'завершити') {
+                userState.delete(userId);
+                await sendText(chatId, "✅ Вибір завершено.", { reply_markup: { remove_keyboard: true } });
+                await showExclusionMenu(userId, chatId, state.data.messageId, phone);
+                return;
+            }
+            const choice = parseInt(text, 10);
+            if (isNaN(choice) || choice < 1 || choice > channels.length) {
+                 return; // Ігноруємо невірне введення
+            }
+            const selectedChannel = channels[choice - 1];
+            await addChannelToExclusions(userId, phone, selectedChannel.id.toString());
+            await sendText(chatId, `Канал "${selectedChannel.title}" додано до виключень.`);
+            
+            await deleteMessage(chatId, state.data.messageId);
+            await showExclusionList(userId, chatId, phone);
+            break;
+
+        case 'awaiting_exclusion_manual': {
+            const { phone } = state.data;
+            if (text.toLowerCase() === 'завершити') {
+                userState.delete(userId);
+                await sendText(chatId, "✅ Введення завершено.", { reply_markup: { remove_keyboard: true } });
+                await showExclusionMenu(userId, chatId, null, phone);
+                return;
+            }
+            const id = text.match(/-?\d{10,}/)?.[0] || text;
+            await addChannelToExclusions(userId, phone, id.toString());
+            await sendText(chatId, `✅ ID <code>${escapeHtml(id)}</code> додано до виключень. Введіть наступний або натисніть "Завершити".`);
+            break;
+        }
+    }
+}
+
+async function handleCallbackQuery(callbackQuery) {
+    const userId = callbackQuery.from.id;
+    const chatId = callbackQuery.message.chat.id;
+    const messageId = callbackQuery.message.message_id;
+    const [action, payload] = callbackQuery.data.split(/:(.*)/s);
+
+    await axios.post(`${TELEGRAM_API}/answerCallbackQuery`, { callback_query_id: callbackQuery.id });
+
+    switch (action) {
+        case 'add_account_start':
+            userState.set(userId, { step: 'awaiting_phone', data: {} });
+            await editText(chatId, messageId, "Введіть номер телефону у міжнародному форматі (наприклад, +380991234567), до якого ви хочете під'єднатись.");
+            break;
+        case 'select_account':
+            await showAccountStats(userId, chatId, messageId, payload);
+            break;
+        case 'start_read':
+            await showExclusionMenu(userId, chatId, messageId, payload);
+            break;
+        case 'manage_exclusions':
+            await showExclusionAddOptions(userId, chatId, messageId, payload);
+            break;
+        case 'exclusion_list_channels':
+            await deleteMessage(chatId, messageId);
+            await showExclusionList(userId, chatId, payload);
+            break;
+        case 'exclusion_add_manual':
+             await deleteMessage(chatId, messageId);
+             userState.set(userId, { step: 'awaiting_exclusion_manual', data: { phone: payload }});
+             await sendText(chatId, "Введіть ID або посилання на канал, який потрібно виключити.", {
+                 reply_markup: { keyboard: [[{ text: "Завершити" }]], resize_keyboard: true, one_time_keyboard: true }
+             });
+            break;
+        case 'back_to_stats':
+            await showAccountStats(userId, chatId, messageId, payload);
+            break;
+        case 'confirm_read':
+            await startReadingProcess(userId, chatId, messageId, payload);
+            break;
+    }
+}
+
+// ============ ЛОГІКА ІНТЕРАКТИВНИХ МЕНЮ ============
+async function showAccountStats(userId, chatId, messageId, phone) {
+    const text = `⏳ Зачекайте, отримую дані для акаунту <b>${phone}</b>...`;
+    if (messageId) await editText(chatId, messageId, text); else messageId = (await sendText(chatId, text)).message_id;
+    
+    const userData = await getUserData(userId);
+    const account = userData.accounts.find(acc => acc.phone === phone);
+    if (!account) return await editText(chatId, messageId, "Помилка: акаунт не знайдено.");
+
+    const client = await connectWithSession(account.session);
+    if (!client) return await editText(chatId, messageId, "⚠️ Не вдалося підключитися. Спробуйте додати акаунт знову.");
+
+    try {
+        const dialogs = await client.getDialogs({ limit: 200 });
+        const channels = dialogs.filter(d => d.isChannel && d.entity.broadcast);
+
+        let total = channels.length;
+        let unreadCount = channels.filter(d => d.unreadCount > 0).length;
+        const readCount = total - unreadCount;
+        
+        const newText = `📊 Статистика для <b>${phone}</b>:\n\n` +
+                        `Загалом каналів: <b>${total}</b>\n` +
+                        `Непрочитаних: <b>${unreadCount}</b>\n` +
+                        `Прочитаних: <b>${readCount}</b>\n\n` +
+                        `Натисніть "Прочитати", щоб розпочати аналіз непрочитаних каналів.`;
+        
+        const keyboard = {
+            inline_keyboard: [[{ text: "📖 Прочитати", callback_data: `start_read:${phone}` }]]
+        };
+        
+        await editText(chatId, messageId, newText, { reply_markup: keyboard });
+
+    } catch(e) {
+        console.error("Error getting dialogs:", e);
+        await editText(chatId, messageId, "Сталася помилка при отриманні списку каналів.");
+    } finally {
+        await client.disconnect();
+    }
+}
+
+async function showExclusionMenu(userId, chatId, messageId, phone) {
+    const userData = await getUserData(userId);
+    const account = userData.accounts.find(acc => acc.phone === phone);
+    const excluded = account.excluded_channels || [];
+
+    let text = `<b>Керування виключеннями для ${phone}</b>\n\n`;
+    if (excluded.length > 0) {
+        text += "Канали, які будуть проігноровані при читанні:\n";
+        excluded.forEach(id => {
+            text += `<code>- ${id}</code>\n`;
+        });
+    } else {
+        text += "Список виключень порожній. Усі непрочитані канали будуть проаналізовані.";
+    }
+
+    const keyboard = {
+        inline_keyboard: [
+            [{ text: "➕ Додати/Видалити виключення", callback_data: `manage_exclusions:${phone}` }],
+            [{ text: "✅ Прочитати зараз", callback_data: `confirm_read:${phone}` }],
+            [{ text: "⬅️ Назад", callback_data: `back_to_stats:${phone}` }]
+        ]
+    };
+    if (messageId) await editText(chatId, messageId, text, { reply_markup: keyboard });
+    else await sendText(chatId, text, { reply_markup: keyboard });
+}
+
+async function showExclusionAddOptions(userId, chatId, messageId, phone) {
+    const text = "Як ви хочете додати канал до виключень?";
+    const keyboard = {
+        inline_keyboard: [
+            [{ text: "📝 Показати список каналів", callback_data: `exclusion_list_channels:${phone}` }],
+            [{ text: "✍️ Ввести ID/посилання", callback_data: `exclusion_add_manual:${phone}` }],
+            [{ text: "⬅️ Назад", callback_data: `start_read:${phone}` }]
+        ]
+    };
+    await editText(chatId, messageId, text, { reply_markup: keyboard });
+}
+
+async function showExclusionList(userId, chatId, phone) {
+    const sentMsg = await sendText(chatId, "⏳ Отримую список каналів...");
+    const userData = await getUserData(userId);
+    const account = userData.accounts.find(acc => acc.phone === phone);
+    const excludedIds = account.excluded_channels || [];
+
+    const client = await connectWithSession(account.session);
+    if (!client) return await editText(chatId, sentMsg.message_id, "Помилка підключення.");
+
+    try {
+        const dialogs = await client.getDialogs({ limit: 200 });
+        const channels = dialogs
+            .filter(d => d.isChannel && d.entity.broadcast && !excludedIds.includes(d.entity.id.toString()))
+            .map(d => ({ id: d.entity.id, title: d.title }));
+
+        if (channels.length === 0) {
+            await editText(chatId, sentMsg.message_id, "Немає каналів для додавання у виключення (або всі вже там).");
+            await showExclusionMenu(userId, chatId, null, phone);
+            return;
+        }
+
+        userState.set(userId, { step: 'managing_exclusions_list', data: { phone, channels, messageId: sentMsg.message_id } });
+        
+        let text = "Натисніть на номер каналу, щоб додати його у виключення:\n\n";
+        const keyboardButtons = [];
+        let row = [];
+        channels.forEach((ch, index) => {
+            text += `${index + 1}. ${escapeHtml(ch.title)}\n`;
+            row.push({ text: String(index + 1) });
+            if (row.length === 5) {
+                keyboardButtons.push(row);
+                row = [];
+            }
+        });
+        if (row.length > 0) keyboardButtons.push(row);
+        keyboardButtons.push([{text: "Завершити"}]);
+
+        await editText(chatId, sentMsg.message_id, text, { 
+            reply_markup: { keyboard: keyboardButtons, resize_keyboard: true }
+        });
+
+    } catch (e) {
+        console.error("Error getting channels for exclusion:", e);
+        await editText(chatId, sentMsg.message_id, "Помилка при отриманні списку каналів.");
+    } finally {
+        await client.disconnect();
+    }
+}
+
+async function addChannelToExclusions(userId, phone, channelId) {
+    const userData = await getUserData(userId);
+    const account = userData.accounts.find(acc => acc.phone === phone);
+    if (account) {
+        if (!account.excluded_channels) account.excluded_channels = [];
+        if (!account.excluded_channels.includes(channelId)) {
+            account.excluded_channels.push(channelId);
+            await saveUserData(userId, userData);
+        }
+    }
+}
+
+// ============ OpenAI ЛОГІКА ============
+async function startReadingProcess(userId, chatId, messageId, phone) {
+    await editText(chatId, messageId, "⏳ Починаю процес... Підключаюся та шукаю непрочитані канали.");
+
+    const userData = await getUserData(userId);
+    const account = userData.accounts.find(acc => acc.phone === phone);
+    if (!account) return await editText(chatId, messageId, "Помилка: акаунт не знайдено.");
+    
+    const client = await connectWithSession(account.session);
+    if (!client) return await editText(chatId, messageId, "Не вдалося підключитися до сесії.");
+
+    try {
+        const dialogs = await client.getDialogs({ limit: 200 });
+        const unreadChannels = dialogs.filter(d => 
+            d.isChannel && 
+            d.entity.broadcast && 
+            d.unreadCount > 0 && 
+            !account.excluded_channels.includes(d.entity.id.toString())
+        );
+
+        if (unreadChannels.length === 0) {
+            await editText(chatId, messageId, "✅ Немає непрочитаних каналів для аналізу.");
+            return;
+        }
+
+        await editText(chatId, messageId, `Знайдено ${unreadChannels.length} непрочитаних каналів. Збираю повідомлення... Це може зайняти деякий час.`);
+        
+        const allSummaries = [];
+        let channelsProcessed = 0;
+        const channelChunks = [];
+        for (let i = 0; i < unreadChannels.length; i += 5) {
+            channelChunks.push(unreadChannels.slice(i, i + 5));
+        }
+        
+        for (const chunk of channelChunks) {
+            let chunkText = "";
+            for (const dialog of chunk) {
+                const channelEntity = dialog.entity;
+                const channelLink = channelEntity.username ? `https://t.me/${channelEntity.username}` : `(приватний канал ${channelEntity.id})`;
+                chunkText += `---Start ${channelLink}---\n`;
+                
+                const messages = await client.getMessages(channelEntity, { limit: dialog.unreadCount });
+                for (const msg of messages.reverse()) {
+                    if (msg.message) {
+                        const msgLink = `https://t.me/${channelEntity.username || 'c/' + channelEntity.id}/${msg.id}`;
+                        chunkText += `-Start ${msgLink}-\n${msg.message}\n-End ${msgLink}-\n`;
+                    }
+                }
+                chunkText += `---End ${channelLink}---\n`;
+                
+                await client.sendReadAction(channelEntity);
+            }
+
+            channelsProcessed += chunk.length;
+            await editText(chatId, messageId, `Оброблено ${channelsProcessed} з ${unreadChannels.length} каналів. Відправляю дані на аналіз...`);
+            
+            const summary = await getOpenAISummary(chunkText);
+            if (summary) {
+                allSummaries.push(summary);
+            }
+        }
+        
+        if (allSummaries.length > 0) {
+            const finalSummary = "<b>✨ Ось фінальна вижимка з усіх каналів:</b>\n\n" + allSummaries.join("\n\n---\n\n");
+            await sendText(chatId, finalSummary, { parse_mode: 'HTML', disable_web_page_preview: true });
+            await deleteMessage(chatId, messageId);
+        } else {
+            await editText(chatId, messageId, "✅ Аналіз завершено, але не вдалося згенерувати вижимку.");
+        }
+
+    } catch (e) {
+        console.error("Reading process error:", e);
+        await editText(chatId, messageId, `❌ Сталася помилка під час обробки: ${e.message}`);
+    } finally {
+        await client.disconnect();
+    }
+}
+
+async function getOpenAISummary(messages) {
+    const prompt = `Тобі будуть надані повідомлення з Telegram-каналу.
+Твоє завдання: зробити дуже коротку, чітку та зрозумілу смислову вижимку всіх цих повідомлень.
+Важливі умови:
+- Не вигадуй нічого нового, не додавай власних думок.
+- Передай лише основний сенс, без втрати змісту.
+- Відповідь повинна складатися тільки з цієї вижимки — нічого більше.
+- Якщо там буде рекламне повідомлення ти його не додаєш до вижимки.
+- Це вижимка з усі повідомлень разом розділяєш по темам але не по повідомленням це сплошний текст.
+- Передавай його на українській мові.
+- Якщо тобі передається з посиланнями на канал тоді ти його в такому форматі з відки цетуєш саме з якого каналу - передаєш посилання для вьсого іншого не використовуй маркдавн тільки звичайне форматування текстом: [текст посилання](https://example.com).
+
+Повідомлення розділяються через '---' тобі може передаватись набір повідомлень з кількох каналів одразу в такому форматі:
+---Start Посилання на канал---
+-Start посилання на повідомлення в каналі-
+повідомлення 1.
+-End посилання на повідомлення в каналі-
+---End Посилання на канал---
+Повідомлення:`;
+
+    try {
+        const response = await openai.chat.completions.create({
+            model: "gpt-4o",
+            messages: [
+                { role: "system", content: prompt },
+                { role: "user", content: messages }
+            ],
+            temperature: 0.2,
+        });
+        return response.choices[0].message.content;
+    } catch (error) {
+        console.error("OpenAI API error:", error);
+        return "Не вдалося отримати вижимку від AI. Помилка API.";
+    }
+}
+
+// ============ STARTUP ============
 app.get("/", (req, res) => res.send("✅ Bot is running on Render"));
 app.get("/webhook", (req, res) => res.send("Webhook endpoint is POST-only. OK ✅"));
 
-// ============ STARTUP ============
 app.listen(PORT, async () => {
   console.log(`Server on ${PORT}`);
-
-  // Підготуємо "БД" файли
   try {
-    await ensureDbFiles();
+    await ensureDbFile();
+    console.log("Database file checked/initialized.");
   } catch (e) {
     console.error("GitHub DB init error:", e?.message || e);
   }
 
-  // Пробуємо зареєструвати webhook
   const host = process.env.RENDER_EXTERNAL_HOSTNAME;
   if (host) {
     const url = `https://${host}/webhook`;
