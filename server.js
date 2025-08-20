@@ -408,7 +408,7 @@ async function handleMessage(msg) {
             await sendText(chatId, `Канал "${selectedChannel.title}" додано до виключень.`);
             
             await deleteMessage(chatId, state.data.messageId);
-            await showExclusionList(userId, chatId, phone);
+            await showExclusionList(userId, chatId, null, phone); // Pass null for messageId to create a new message
             break;
 
         case 'awaiting_exclusion_manual': {
@@ -547,7 +547,12 @@ async function showExclusionAddOptions(userId, chatId, messageId, phone) {
 }
 
 async function showExclusionList(userId, chatId, messageId, phone) {
-    await editText(chatId, messageId, "⏳ Отримую список каналів...", {reply_markup: {}});
+    // Якщо messageId є, редагуємо його, якщо ні - створюємо нове
+    if (messageId) {
+        await editText(chatId, messageId, "⏳ Отримую список каналів...", {reply_markup: {}});
+    } else {
+        messageId = (await sendText(chatId, "⏳ Отримую список каналів...")).message_id;
+    }
     
     const userData = await getUserData(userId);
     const account = userData.accounts.find(acc => acc.phone === phone);
@@ -563,9 +568,7 @@ async function showExclusionList(userId, chatId, messageId, phone) {
             .map(d => ({ id: d.entity.id, title: d.title }));
 
         if (channels.length === 0) {
-            // **ВИПРАВЛЕНО**: Коректно редагуємо повідомлення, перетворюючи його назад в меню
             await showExclusionMenu(userId, chatId, messageId, phone);
-            // Додамо тимчасове повідомлення про те, що список порожній
             await sendText(chatId, "Немає каналів для додавання у виключення (або всі вже там).");
             return;
         }
@@ -586,7 +589,6 @@ async function showExclusionList(userId, chatId, messageId, phone) {
         if (row.length > 0) keyboardButtons.push(row);
         keyboardButtons.push([{text: "Завершити"}]);
 
-        // Видаляємо інлайн-клавіатуру та показуємо звичайну
         await editText(chatId, messageId, text, { reply_markup: {} });
         await sendText(chatId, "Оберіть номер на клавіатурі нижче:", { 
             reply_markup: { keyboard: keyboardButtons, resize_keyboard: true }
@@ -663,9 +665,10 @@ async function startReadingProcess(userId, chatId, messageId, phone) {
                 }
                 chunkText += `---End ${channelLink}---\n`;
                 
-                // **ВИПРАВЛЕНО**: Використовуємо dialog.inputEntity замість dialog.entity
+                // **ВИПРАВЛЕНО**: Використовуємо client.getInputEntity для надійного отримання peer
+                const inputPeer = await client.getInputEntity(dialog.entity);
                 await client.invoke(new Api.messages.ReadHistory({
-                    peer: dialog.inputEntity,
+                    peer: inputPeer,
                     max_id: 0
                 }));
             }
