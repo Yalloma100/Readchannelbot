@@ -438,7 +438,7 @@ async function handleCallbackQuery(callbackQuery) {
     switch (action) {
         case 'add_account_start':
             userState.set(userId, { step: 'awaiting_phone', data: {} });
-            await editText(chatId, messageId, "Введіть номер телефону у міжнародному форматі (наприклад, +380991234567), до якого ви хочете під'єднатись.");
+            await editText(chatId, messageId, "Введіть номер телефону у міжнародному форматі (наприклад, +380991234567), до якого ви хочете під'єднатись.", {reply_markup:{}});
             break;
         case 'select_account':
             await showAccountStats(userId, chatId, messageId, payload);
@@ -450,8 +450,7 @@ async function handleCallbackQuery(callbackQuery) {
             await showExclusionAddOptions(userId, chatId, messageId, payload);
             break;
         case 'exclusion_list_channels':
-            await deleteMessage(chatId, messageId);
-            await showExclusionList(userId, chatId, payload);
+            await showExclusionList(userId, chatId, messageId, payload);
             break;
         case 'exclusion_add_manual':
              await deleteMessage(chatId, messageId);
@@ -472,7 +471,7 @@ async function handleCallbackQuery(callbackQuery) {
 // ============ ЛОГІКА ІНТЕРАКТИВНИХ МЕНЮ ============
 async function showAccountStats(userId, chatId, messageId, phone) {
     const text = `⏳ Зачекайте, отримую дані для акаунту <b>${phone}</b>...`;
-    if (messageId) await editText(chatId, messageId, text); else messageId = (await sendText(chatId, text)).message_id;
+    if (messageId) await editText(chatId, messageId, text, { reply_markup: {} }); else messageId = (await sendText(chatId, text)).message_id;
     
     const userData = await getUserData(userId);
     const account = userData.accounts.find(acc => acc.phone === phone);
@@ -505,7 +504,7 @@ async function showAccountStats(userId, chatId, messageId, phone) {
         console.error("Error getting dialogs:", e);
         await editText(chatId, messageId, "Сталася помилка при отриманні списку каналів.");
     } finally {
-        await client.disconnect();
+        if (client) await client.disconnect();
     }
 }
 
@@ -547,14 +546,15 @@ async function showExclusionAddOptions(userId, chatId, messageId, phone) {
     await editText(chatId, messageId, text, { reply_markup: keyboard });
 }
 
-async function showExclusionList(userId, chatId, phone) {
-    const sentMsg = await sendText(chatId, "⏳ Отримую список каналів...");
+async function showExclusionList(userId, chatId, messageId, phone) {
+    await editText(chatId, messageId, "⏳ Отримую список каналів...", {reply_markup: {}});
+    
     const userData = await getUserData(userId);
     const account = userData.accounts.find(acc => acc.phone === phone);
     const excludedIds = account.excluded_channels || [];
 
     const client = await connectWithSession(account.session);
-    if (!client) return await editText(chatId, sentMsg.message_id, "Помилка підключення.");
+    if (!client) return await editText(chatId, messageId, "Помилка підключення.");
 
     try {
         const dialogs = await client.getDialogs({ limit: 200 });
@@ -563,14 +563,16 @@ async function showExclusionList(userId, chatId, phone) {
             .map(d => ({ id: d.entity.id, title: d.title }));
 
         if (channels.length === 0) {
-            await editText(chatId, sentMsg.message_id, "Немає каналів для додавання у виключення (або всі вже там).");
-            await showExclusionMenu(userId, chatId, null, phone);
+            // **ВИПРАВЛЕНО**: Коректно редагуємо повідомлення, перетворюючи його назад в меню
+            await showExclusionMenu(userId, chatId, messageId, phone);
+            // Додамо тимчасове повідомлення про те, що список порожній
+            await sendText(chatId, "Немає каналів для додавання у виключення (або всі вже там).");
             return;
         }
 
-        userState.set(userId, { step: 'managing_exclusions_list', data: { phone, channels, messageId: sentMsg.message_id } });
+        userState.set(userId, { step: 'managing_exclusions_list', data: { phone, channels, messageId: messageId } });
         
-        let text = "Натисніть на номер каналу, щоб додати його у виключення:\n\n";
+        let text = "Надішліть номер каналу, щоб додати його у виключення:\n\n";
         const keyboardButtons = [];
         let row = [];
         channels.forEach((ch, index) => {
@@ -584,15 +586,18 @@ async function showExclusionList(userId, chatId, phone) {
         if (row.length > 0) keyboardButtons.push(row);
         keyboardButtons.push([{text: "Завершити"}]);
 
-        await editText(chatId, sentMsg.message_id, text, { 
+        // Видаляємо інлайн-клавіатуру та показуємо звичайну
+        await editText(chatId, messageId, text, { reply_markup: {} });
+        await sendText(chatId, "Оберіть номер на клавіатурі нижче:", { 
             reply_markup: { keyboard: keyboardButtons, resize_keyboard: true }
         });
 
+
     } catch (e) {
         console.error("Error getting channels for exclusion:", e);
-        await editText(chatId, sentMsg.message_id, "Помилка при отриманні списку каналів.");
+        await editText(chatId, messageId, "Помилка при отриманні списку каналів.");
     } finally {
-        await client.disconnect();
+        if (client) await client.disconnect();
     }
 }
 
@@ -610,7 +615,7 @@ async function addChannelToExclusions(userId, phone, channelId) {
 
 // ============ OpenAI ЛОГІКА ============
 async function startReadingProcess(userId, chatId, messageId, phone) {
-    await editText(chatId, messageId, "⏳ Починаю процес... Підключаюся та шукаю непрочитані канали.");
+    await editText(chatId, messageId, "⏳ Починаю процес... Підключаюся та шукаю непрочитані канали.", {reply_markup:{}});
 
     const userData = await getUserData(userId);
     const account = userData.accounts.find(acc => acc.phone === phone);
@@ -658,10 +663,10 @@ async function startReadingProcess(userId, chatId, messageId, phone) {
                 }
                 chunkText += `---End ${channelLink}---\n`;
                 
-                // **ВИПРАВЛЕНО**: Використовуємо правильний метод для позначення каналу як прочитаного
+                // **ВИПРАВЛЕНО**: Використовуємо dialog.inputEntity замість dialog.entity
                 await client.invoke(new Api.messages.ReadHistory({
-                    peer: channelEntity,
-                    max_id: 0 // Позначає всю історію як прочитану
+                    peer: dialog.inputEntity,
+                    max_id: 0
                 }));
             }
 
@@ -677,7 +682,6 @@ async function startReadingProcess(userId, chatId, messageId, phone) {
         if (allSummaries.length > 0) {
             const finalSummary = "<b>✨ Ось фінальна вижимка з усіх каналів:</b>\n\n" + allSummaries.join("\n\n---\n\n");
             
-            // Розбиваємо повідомлення, якщо воно занадто довге
             const MAX_LENGTH = 4096;
             if (finalSummary.length > MAX_LENGTH) {
                 for (let i = 0; i < finalSummary.length; i += MAX_LENGTH) {
@@ -697,7 +701,7 @@ async function startReadingProcess(userId, chatId, messageId, phone) {
         console.error("Reading process error:", e);
         await editText(chatId, messageId, `❌ Сталася помилка під час обробки: ${e.message}`);
     } finally {
-        await client.disconnect();
+        if (client) await client.disconnect();
     }
 }
 
