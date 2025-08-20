@@ -33,7 +33,7 @@ if (OPENAI_API_KEY === "YOUR_OPENAI_API_KEY_HERE") {
 import express from "express";
 import axios from "axios";
 import { Octokit } from "@octokit/rest";
-import { TelegramClient } from "telegram";
+import { TelegramClient, Api } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
 
 // ============ GLOBALS ============
@@ -658,7 +658,11 @@ async function startReadingProcess(userId, chatId, messageId, phone) {
                 }
                 chunkText += `---End ${channelLink}---\n`;
                 
-                await client.sendReadAction(channelEntity);
+                // **ВИПРАВЛЕНО**: Використовуємо правильний метод для позначення каналу як прочитаного
+                await client.invoke(new Api.messages.ReadHistory({
+                    peer: channelEntity,
+                    max_id: 0 // Позначає всю історію як прочитану
+                }));
             }
 
             channelsProcessed += chunk.length;
@@ -672,8 +676,19 @@ async function startReadingProcess(userId, chatId, messageId, phone) {
         
         if (allSummaries.length > 0) {
             const finalSummary = "<b>✨ Ось фінальна вижимка з усіх каналів:</b>\n\n" + allSummaries.join("\n\n---\n\n");
-            await sendText(chatId, finalSummary, { parse_mode: 'HTML', disable_web_page_preview: true });
+            
+            // Розбиваємо повідомлення, якщо воно занадто довге
+            const MAX_LENGTH = 4096;
+            if (finalSummary.length > MAX_LENGTH) {
+                for (let i = 0; i < finalSummary.length; i += MAX_LENGTH) {
+                    const part = finalSummary.substring(i, i + MAX_LENGTH);
+                    await sendText(chatId, part, { parse_mode: 'HTML', disable_web_page_preview: true });
+                }
+            } else {
+                await sendText(chatId, finalSummary, { parse_mode: 'HTML', disable_web_page_preview: true });
+            }
             await deleteMessage(chatId, messageId);
+
         } else {
             await editText(chatId, messageId, "✅ Аналіз завершено, але не вдалося згенерувати вижимку.");
         }
