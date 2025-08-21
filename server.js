@@ -2,7 +2,10 @@
 // ============ CONFIG ============
 import { OpenAI } from "openai";
 
+// TODO(you): ВСТАВ СЮДИ OpenAI API ключ
 const OPENAI_API_KEY = "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"
+
+
 // GitHub доступ (ПРЯМО В КОДІ, як просив)
 const GITHUB_TOKEN = "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";                 // <— твій GitHub Personal Access Token (repo scope)
 const GITHUB_OWNER = "Yalloma100";         // <— власник репозиторію
@@ -264,6 +267,7 @@ async function handleMessage(msg) {
     const chatId = msg.chat.id, userId = msg.from.id;
     const text = (msg.text || "").trim();
     const state = userState.get(userId);
+
     if (text.startsWith("/")) {
         userState.delete(userId);
         const [command, args] = text.split(/ (.*)/s);
@@ -275,7 +279,9 @@ async function handleMessage(msg) {
             default: return await sendText(chatId, "Невідома команда.");
         }
     }
+
     if (!state) return;
+
     switch (state.step) {
         case 'awaiting_phone':
             if (!/^\+?\d{10,15}$/.test(text)) return await sendText(chatId, "Невірний формат. Приклад: +380...");
@@ -301,6 +307,33 @@ async function handleMessage(msg) {
         case 'awaiting_2fa':
             if (state.data?.passResolver) state.data.passResolver(text.toLowerCase() === 'нема' ? '' : text);
             break;
+        case 'managing_exclusions_list':
+            const { phone, channels } = state.data;
+            if (text.toLowerCase() === 'завершити') {
+                userState.delete(userId);
+                await sendText(chatId, "✅ Вибір завершено.", { reply_markup: { remove_keyboard: true } });
+                return await showExclusionMenu(userId, chatId, state.data.messageId, phone);
+            }
+            const choice = parseInt(text, 10);
+            if (isNaN(choice) || choice < 1 || choice > channels.length) return;
+            const selectedChannel = channels[choice - 1];
+            await addChannelToExclusions(userId, phone, selectedChannel.id.toString());
+            await sendText(chatId, `Канал "${selectedChannel.title}" додано до виключень.`);
+            await deleteMessage(chatId, state.data.messageId);
+            await showExclusionList(userId, chatId, null, phone);
+            break;
+        case 'awaiting_exclusion_manual': {
+            const { phone } = state.data;
+            if (text.toLowerCase() === 'завершити') {
+                userState.delete(userId);
+                await sendText(chatId, "✅ Введення завершено.", { reply_markup: { remove_keyboard: true } });
+                return await showExclusionMenu(userId, chatId, null, phone);
+            }
+            const id = text.match(/-?\d{10,}/)?.[0] || text;
+            await addChannelToExclusions(userId, phone, id.toString());
+            await sendText(chatId, `✅ ID <code>${escapeHtml(id)}</code> додано до виключень.`);
+            break;
+        }
     }
 }
 
@@ -319,13 +352,29 @@ async function handleCallbackQuery(callbackQuery) {
         case 'start_read':
             await showExclusionMenu(userId, chatId, messageId, payload);
             break;
+        case 'manage_exclusions':
+            await showExclusionAddOptions(userId, chatId, messageId, payload);
+            break;
+        case 'exclusion_list_channels':
+            await showExclusionList(userId, chatId, messageId, payload);
+            break;
+        case 'exclusion_add_manual':
+             await deleteMessage(chatId, messageId);
+             userState.set(userId, { step: 'awaiting_exclusion_manual', data: { phone: payload }});
+             await sendText(chatId, "Введіть ID або посилання на канал.", {
+                 reply_markup: { keyboard: [[{ text: "Завершити" }]], resize_keyboard: true, one_time_keyboard: true }
+             });
+            break;
+        case 'back_to_stats':
+            await showAccountStats(userId, chatId, messageId, payload);
+            break;
         case 'confirm_read':
             await startReadingProcess(userId, chatId, messageId, payload);
             break;
     }
 }
 
-// ============ ЛОГІКА ІНТЕРАКТИВНИХ МЕНЮ (без змін) ============
+// ============ ЛОГІКА ІНТЕРАКТИВНИХ МЕНЮ ============
 async function showAccountStats(userId, chatId, messageId, phone) {
     const text = `⏳ Отримую дані для <b>${phone}</b>...`;
     if (messageId) await editText(chatId, messageId, text, { reply_markup: {} }); else messageId = (await sendText(chatId, text))?.message_id;
@@ -349,7 +398,6 @@ async function showAccountStats(userId, chatId, messageId, phone) {
 }
 
 async function showExclusionMenu(userId, chatId, messageId, phone) {
-    // Ця та інші функції меню залишаються без змін, оскільки вони не стосуються процесу читання
     const userData = await getUserData(userId);
     const account = userData.accounts.find(acc => acc.phone === phone);
     const excluded = account.excluded_channels || [];
@@ -357,7 +405,7 @@ async function showExclusionMenu(userId, chatId, messageId, phone) {
     text += excluded.length > 0 ? "Канали, які будуть проігноровані:\n" + excluded.map(id => `<code>- ${id}</code>`).join('\n') : "Список виключень порожній.";
     const keyboard = {
         inline_keyboard: [
-            //[{ text: "➕ Керувати виключеннями", callback_data: `manage_exclusions:${phone}` }], // Можна тимчасово приховати
+            [{ text: "➕ Керувати виключеннями", callback_data: `manage_exclusions:${phone}` }],
             [{ text: "✅ Прочитати зараз", callback_data: `confirm_read:${phone}` }],
             [{ text: "⬅️ Назад", callback_data: `back_to_stats:${phone}` }]
         ]
@@ -366,23 +414,87 @@ async function showExclusionMenu(userId, chatId, messageId, phone) {
     else await sendText(chatId, text, { reply_markup: keyboard });
 }
 
+async function showExclusionAddOptions(userId, chatId, messageId, phone) {
+    const text = "Як додати канал до виключень?";
+    const keyboard = {
+        inline_keyboard: [
+            [{ text: "📝 Показати список", callback_data: `exclusion_list_channels:${phone}` }],
+            [{ text: "✍️ Ввести ID", callback_data: `exclusion_add_manual:${phone}` }],
+            [{ text: "⬅️ Назад", callback_data: `start_read:${phone}` }]
+        ]
+    };
+    await editText(chatId, messageId, text, { reply_markup: keyboard });
+}
 
-// ============ OpenAI ЛОГІКА (ЗМІНЕНА) ============
+async function showExclusionList(userId, chatId, messageId, phone) {
+    if (messageId) await editText(chatId, messageId, "⏳ Отримую список каналів...", {reply_markup: {}});
+    else messageId = (await sendText(chatId, "⏳ Отримую список каналів..."))?.message_id;
+    const userData = await getUserData(userId);
+    const account = userData.accounts.find(acc => acc.phone === phone);
+    const excludedIds = account.excluded_channels || [];
+    const client = await connectWithSession(account.session);
+    if (!client) return await editText(chatId, messageId, "Помилка підключення.");
+    try {
+        const dialogs = await client.getDialogs({ limit: 200 });
+        const channels = dialogs
+            .filter(d => d.isChannel && d.entity.broadcast && !excludedIds.includes(d.entity.id.toString()))
+            .map(d => ({ id: d.entity.id, title: d.title }));
+        if (channels.length === 0) {
+            await showExclusionMenu(userId, chatId, messageId, phone);
+            return await sendText(chatId, "Немає каналів для додавання у виключення.");
+        }
+        userState.set(userId, { step: 'managing_exclusions_list', data: { phone, channels, messageId: messageId } });
+        let text = "Надішліть номер каналу для виключення:\n\n";
+        const keyboardButtons = [];
+        let row = [];
+        channels.forEach((ch, index) => {
+            text += `${index + 1}. ${escapeHtml(ch.title)}\n`;
+            row.push({ text: String(index + 1) });
+            if (row.length === 5) { keyboardButtons.push(row); row = []; }
+        });
+        if (row.length > 0) keyboardButtons.push(row);
+        keyboardButtons.push([{text: "Завершити"}]);
+        await editText(chatId, messageId, text, { reply_markup: {} });
+        await sendText(chatId, "Оберіть номер на клавіатурі:", { 
+            reply_markup: { keyboard: keyboardButtons, resize_keyboard: true }
+        });
+    } catch (e) {
+        console.error("Error getting channels for exclusion:", e);
+        await editText(chatId, messageId, "Помилка при отриманні списку каналів.");
+    } finally {
+        if (client) await client.disconnect();
+    }
+}
+
+async function addChannelToExclusions(userId, phone, channelId) {
+    const userData = await getUserData(userId);
+    const account = userData.accounts.find(acc => acc.phone === phone);
+    if (account) {
+        if (!account.excluded_channels) account.excluded_channels = [];
+        if (!account.excluded_channels.includes(channelId)) {
+            account.excluded_channels.push(channelId);
+            await saveUserData(userId, userData);
+        }
+    }
+}
+
+// ============ OpenAI ЛОГІКА ============
 async function startReadingProcess(userId, chatId, messageId, phone) {
     await editText(chatId, messageId, "⏳ Починаю процес... (позначення прочитаним вимкнено)", {reply_markup:{}});
-    
     let userData = await getUserData(userId);
     let accountIndex = userData.accounts.findIndex(acc => acc.phone === phone);
     if (accountIndex === -1) return await editText(chatId, messageId, "Помилка: акаунт не знайдено.");
-
-    // **ДОДАНО**: Очищуємо список оброблених каналів для нового запуску
+    
+    // Очищуємо список оброблених каналів для нового запуску
+    if (!userData.accounts[accountIndex].processed_channel_ids) {
+        userData.accounts[accountIndex].processed_channel_ids = [];
+    }
     userData.accounts[accountIndex].processed_channel_ids = [];
     await saveUserData(userId, userData);
     const account = userData.accounts[accountIndex];
-
+    
     const client = await connectWithSession(account.session);
     if (!client) return await editText(chatId, messageId, "Не вдалося підключитися.");
-
     try {
         const dialogs = await client.getDialogs({ limit: 200 });
         const unreadChannels = dialogs.filter(d => 
@@ -397,7 +509,6 @@ async function startReadingProcess(userId, chatId, messageId, phone) {
         await editText(chatId, messageId, `Знайдено ${unreadChannels.length} непрочитаних каналів. Збираю повідомлення...`);
         const allSummaries = [];
         let channelsProcessed = 0;
-        
         const channelChunks = [];
         for (let i = 0; i < unreadChannels.length; i += 5) {
             channelChunks.push(unreadChannels.slice(i, i + 5));
@@ -418,11 +529,8 @@ async function startReadingProcess(userId, chatId, messageId, phone) {
                 }
                 chunkText += `---End ${channelLink}---\n`;
                 
-                // **ВИМКНЕНО**: Позначення каналу як прочитаного.
-                // const inputPeer = await client.getInputEntity(dialog.entity);
-                // await client.invoke(new Api.messages.ReadHistory({ peer: inputPeer, max_id: 0 }));
-
-                // **ДОДАНО**: Запам'ятовуємо, що канал оброблено.
+                // **ВИМКНЕНО**: Позначення каналу як прочитаного
+                // **ДОДАНО**: Запам'ятовуємо, що канал оброблено для цієї сесії
                 userData.accounts[accountIndex].processed_channel_ids.push(channelEntity.id.toString());
             }
 
@@ -430,9 +538,7 @@ async function startReadingProcess(userId, chatId, messageId, phone) {
             await editText(chatId, messageId, `Оброблено ${channelsProcessed}/${unreadChannels.length}. Аналізую...`);
             const summary = await getOpenAISummary(chunkText);
             if (summary) allSummaries.push(summary);
-            
-            // Зберігаємо прогрес після кожного чанку
-            await saveUserData(userId, userData);
+            await saveUserData(userId, userData); // Зберігаємо прогрес
         }
         
         if (allSummaries.length > 0) {
@@ -454,7 +560,24 @@ async function startReadingProcess(userId, chatId, messageId, phone) {
 }
 
 async function getOpenAISummary(messages) {
-    const prompt = `Тобі будуть надані повідомлення з Telegram-каналу. Твоє завдання: зробити дуже коротку, чітку та зрозумілу смислову вижимку. Умови: не вигадуй нічого нового; передай лише основний сенс; ігноруй рекламу; відповідь українською; форматуй посилання як [текст](https://example.com). Повідомлення:`;
+    const prompt = `Тобі будуть надані повідомлення з Telegram-каналу.
+Твоє завдання: зробити дуже коротку, чітку та зрозумілу смислову вижимку всіх цих повідомлень.
+Важливі умови:
+- Не вигадуй нічого нового, не додавай власних думок.
+- Передай лише основний сенс, без втрати змісту.
+- Відповідь повинна складатися тільки з цієї вижимки — нічого більше.
+- Якщо там буде рекламне повідомлення ти його не додаєш до вижимки.
+- Це вижимка з усі повідомлень разом розділяєш по темам але не по повідомленням це сплошний текст.
+- Передавай його на українській мові.
+- Якщо тобі передається з посиланнями на канал тоді ти його в такому форматі з відки цетуєш саме з якого каналу - передаєш посилання для вьсого іншого не використовуй маркдавн тільки звичайне форматування текстом: [текст посилання](https://example.com).
+
+Повідомлення розділяються через '---' тобі може передаватись набір повідомлень з кількох каналів одразу в такому форматі:
+---Start Посилання на канал---
+-Start посилання на повідомлення в каналі-
+повідомлення 1.
+-End посилання на повідомлення в каналі-
+---End Посилання на канал---
+Повідомлення:`;
     try {
         const response = await openai.chat.completions.create({
             model: "gpt-4o",
