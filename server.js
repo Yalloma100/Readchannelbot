@@ -168,7 +168,7 @@ async function startInteractiveLogin(userId, chatId, phone) {
         await saveUserData(userId, userData);
     }
     userState.delete(userId);
-    await sendText(chatId, `✅ Акаунт ${phone} успішно додано!`);
+    await sendText(chatId, `Акаунт ${phone} успішно додано!`);
 }
 
 async function connectWithSession(sessionString) {
@@ -185,8 +185,8 @@ async function connectWithSession(sessionString) {
 
 // ============ COMMANDS & LOGIC ============
 async function cmdStart(msg) {
-    await sendText(msg.chat.id, "👋 Вітаю! Цей бот аналізує непрочитані повідомлення.", {
-        reply_markup: { inline_keyboard: [[{ text: "➕ Додати акаунт", callback_data: "add_account_start" }]] }
+    await sendText(msg.chat.id, "Вітаю! Цей бот аналізує непрочитані повідомлення.", {
+        reply_markup: { inline_keyboard: [[{ text: "Додати акаунт", callback_data: "add_account_start" }]] }
     });
 }
 
@@ -198,7 +198,7 @@ async function cmdRead(msg) {
     if (userData.accounts.length === 1) {
         await showAccountStats(msg.from.id, msg.chat.id, null, userData.accounts[0].phone);
     } else {
-        const buttons = userData.accounts.map(acc => ([{ text: `📱 ${acc.phone}`, callback_data: `select_account:${acc.phone}` }]));
+        const buttons = userData.accounts.map(acc => ([{ text: ` ${acc.phone}`, callback_data: `select_account:${acc.phone}` }]));
         await sendText(msg.chat.id, "Оберіть акаунт для роботи:", { reply_markup: { inline_keyboard: buttons } });
     }
 }
@@ -211,40 +211,40 @@ async function cmdTransfer(msg, args) {
     }
     const [sourceId, phone, targetId] = params;
     const allData = await getAllUsersData();
-    if (!allData[sourceId]?.accounts) return await sendText(msg.chat.id, `❌ У користувача ${sourceId} немає акаунтів.`);
+    if (!allData[sourceId]?.accounts) return await sendText(msg.chat.id, `У користувача ${sourceId} немає акаунтів.`);
     const accountIndex = allData[sourceId].accounts.findIndex(acc => acc.phone === phone);
-    if (accountIndex === -1) return await sendText(msg.chat.id, `❌ Акаунт ${phone} не знайдено.`);
+    if (accountIndex === -1) return await sendText(msg.chat.id, `Акаунт ${phone} не знайдено.`);
     const [accountToTransfer] = allData[sourceId].accounts.splice(accountIndex, 1);
     if (!allData[targetId]) allData[targetId] = { accounts: [] };
-    if(allData[targetId].accounts.some(acc => acc.phone === phone)) return await sendText(msg.chat.id, `⚠️ Користувач ${targetId} вже має цей акаунт.`);
+    if(allData[targetId].accounts.some(acc => acc.phone === phone)) return await sendText(msg.chat.id, ` Користувач ${targetId} вже має цей акаунт.`);
     allData[targetId].accounts.push(accountToTransfer);
     await ghWriteJson(FILE_USERS_DB, allData, `Transfer ${phone} from ${sourceId} to ${targetId}`);
-    await sendText(msg.chat.id, `✅ Сесію для ${phone} перенесено.`);
+    await sendText(msg.chat.id, `Сесію для ${phone} перенесено.`);
 }
 
 async function cmdTestRead(msg) {
     const userId = msg.from.id, chatId = msg.chat.id;
-    await sendText(chatId, "🧪 **Починаю тест читання...**");
+    await sendText(chatId, "**Починаю тест читання...**");
     const userData = await getUserData(userId);
-    if (!userData.accounts?.length) return await sendText(chatId, "❌ Немає акаунтів для тесту.");
+    if (!userData.accounts?.length) return await sendText(chatId, "Немає акаунтів для тесту.");
     const account = userData.accounts[0];
-    await sendText(chatId, `👤 Використовую: <b>${account.phone}</b>`);
+    await sendText(chatId, `Використовую: <b>${account.phone}</b>`);
     const client = await connectWithSession(account.session);
-    if (!client) return await sendText(chatId, "🔌 Не вдалося підключитися.");
+    if (!client) return await sendText(chatId, "Не вдалося підключитися.");
     try {
-        await sendText(chatId, "🔍 Шукаю перший непрочитаний канал...");
+        await sendText(chatId, "Шукаю перший непрочитаний канал...");
         const dialogs = await client.getDialogs({ limit: 200 });
         const target = dialogs.find(d => d.isChannel && d.entity.broadcast && d.unreadCount > 0);
-        if (!target) return await sendText(chatId, "✅ Не знайдено непрочитаних каналів.");
-        await sendText(chatId, `🎯 Знайдено: "<b>${escapeHtml(target.title)}</b>" (${target.unreadCount} непрочитаних)`);
-        await sendText(chatId, "📩 Отримую повідомлення...");
+        if (!target) return await sendText(chatId, "Не знайдено непрочитаних каналів.");
+        await sendText(chatId, `Знайдено: "<b>${escapeHtml(target.title)}</b>" (${target.unreadCount} непрочитаних)`);
+        await sendText(chatId, "Отримую повідомлення...");
         const messages = await client.getMessages(target.entity, { limit: target.unreadCount });
-        await sendText(chatId, `📥 Успішно отримано <b>${messages.length}</b> повідомлень.`);
-        await sendText(chatId, "📖 **Тест-функція позначення прочитаним ВИМКНЕНА.**");
-        await sendText(chatId, "🎉 **Тест завершено успішно!**");
+        await sendText(chatId, `Успішно отримано <b>${messages.length}</b> повідомлень.`);
+        await sendText(chatId, "**Тест-функція позначення прочитаним ВИМКНЕНА.**");
+        await sendText(chatId, "**Тест завершено успішно!**");
     } catch (e) {
         console.error("Test Read error:", e);
-        await sendText(chatId, `❌ **Тест провалено:**\n<code>${escapeHtml(e.message)}</code>`);
+        await sendText(chatId, `**Тест провалено:**\n<code>${escapeHtml(e.message)}</code>`);
     } finally {
         if (client) await client.disconnect();
     }
@@ -293,7 +293,7 @@ async function handleMessage(msg) {
             await sendText(chatId, "Добре, ініціюю вхід...");
             startInteractiveLogin(userId, chatId, text).catch(e => {
                 console.error(e);
-                sendText(chatId, "❌ Помилка авторизації.");
+                sendText(chatId, "Помилка авторизації.");
                 userState.delete(userId);
             });
             break;
@@ -311,7 +311,7 @@ async function handleMessage(msg) {
             const { phone, channels } = state.data;
             if (text.toLowerCase() === 'завершити') {
                 userState.delete(userId);
-                await sendText(chatId, "✅ Вибір завершено.", { reply_markup: { remove_keyboard: true } });
+                await sendText(chatId, "Вибір завершено.", { reply_markup: { remove_keyboard: true } });
                 return await showExclusionMenu(userId, chatId, state.data.messageId, phone);
             }
             const choice = parseInt(text, 10);
@@ -326,12 +326,12 @@ async function handleMessage(msg) {
             const { phone } = state.data;
             if (text.toLowerCase() === 'завершити') {
                 userState.delete(userId);
-                await sendText(chatId, "✅ Введення завершено.", { reply_markup: { remove_keyboard: true } });
+                await sendText(chatId, "Введення завершено.", { reply_markup: { remove_keyboard: true } });
                 return await showExclusionMenu(userId, chatId, null, phone);
             }
             const id = text.match(/-?\d{10,}/)?.[0] || text;
             await addChannelToExclusions(userId, phone, id.toString());
-            await sendText(chatId, `✅ ID <code>${escapeHtml(id)}</code> додано до виключень.`);
+            await sendText(chatId, `ID <code>${escapeHtml(id)}</code> додано до виключень.`);
             break;
         }
     }
@@ -376,19 +376,19 @@ async function handleCallbackQuery(callbackQuery) {
 
 // ============ ЛОГІКА ІНТЕРАКТИВНИХ МЕНЮ ============
 async function showAccountStats(userId, chatId, messageId, phone) {
-    const text = `⏳ Отримую дані для <b>${phone}</b>...`;
+    const text = `Отримую дані для <b>${phone}</b>...`;
     if (messageId) await editText(chatId, messageId, text, { reply_markup: {} }); else messageId = (await sendText(chatId, text))?.message_id;
     const userData = await getUserData(userId);
     const account = userData.accounts.find(acc => acc.phone === phone);
     if (!account) return await editText(chatId, messageId, "Помилка: акаунт не знайдено.");
     const client = await connectWithSession(account.session);
-    if (!client) return await editText(chatId, messageId, "⚠️ Не вдалося підключитися.");
+    if (!client) return await editText(chatId, messageId, "Не вдалося підключитися.");
     try {
         const dialogs = await client.getDialogs({ limit: 200 });
         const channels = dialogs.filter(d => d.isChannel && d.entity.broadcast);
         const unreadCount = channels.filter(d => d.unreadCount > 0).length;
-        const newText = `📊 Статистика для <b>${phone}</b>:\n` + `Каналів: <b>${channels.length}</b>, Непрочитаних: <b>${unreadCount}</b>\n\n` + `Натисніть "Прочитати", щоб розпочати аналіз.`;
-        await editText(chatId, messageId, newText, { reply_markup: { inline_keyboard: [[{ text: "📖 Прочитати", callback_data: `start_read:${phone}` }]] } });
+        const newText = `Статистика для <b>${phone}</b>:\n` + `Каналів: <b>${channels.length}</b>, Непрочитаних: <b>${unreadCount}</b>\n\n` + `Натисніть "Прочитати", щоб розпочати аналіз.`;
+        await editText(chatId, messageId, newText, { reply_markup: { inline_keyboard: [[{ text: "Прочитати", callback_data: `start_read:${phone}` }]] } });
     } catch(e) {
         console.error("Error getting dialogs:", e);
         await editText(chatId, messageId, "Помилка при отриманні списку каналів.");
@@ -405,9 +405,9 @@ async function showExclusionMenu(userId, chatId, messageId, phone) {
     text += excluded.length > 0 ? "Канали, які будуть проігноровані:\n" + excluded.map(id => `<code>- ${id}</code>`).join('\n') : "Список виключень порожній.";
     const keyboard = {
         inline_keyboard: [
-            [{ text: "➕ Керувати виключеннями", callback_data: `manage_exclusions:${phone}` }],
-            [{ text: "✅ Прочитати зараз", callback_data: `confirm_read:${phone}` }],
-            [{ text: "⬅️ Назад", callback_data: `back_to_stats:${phone}` }]
+            [{ text: "Керувати виключеннями", callback_data: `manage_exclusions:${phone}` }],
+            [{ text: "Прочитати зараз", callback_data: `confirm_read:${phone}` }],
+            [{ text: "Назад", callback_data: `back_to_stats:${phone}` }]
         ]
     };
     if (messageId) await editText(chatId, messageId, text, { reply_markup: keyboard });
@@ -418,17 +418,17 @@ async function showExclusionAddOptions(userId, chatId, messageId, phone) {
     const text = "Як додати канал до виключень?";
     const keyboard = {
         inline_keyboard: [
-            [{ text: "📝 Показати список", callback_data: `exclusion_list_channels:${phone}` }],
-            [{ text: "✍️ Ввести ID", callback_data: `exclusion_add_manual:${phone}` }],
-            [{ text: "⬅️ Назад", callback_data: `start_read:${phone}` }]
+            [{ text: "Показати список", callback_data: `exclusion_list_channels:${phone}` }],
+            [{ text: "Ввести ID", callback_data: `exclusion_add_manual:${phone}` }],
+            [{ text: "Назад", callback_data: `start_read:${phone}` }]
         ]
     };
     await editText(chatId, messageId, text, { reply_markup: keyboard });
 }
 
 async function showExclusionList(userId, chatId, messageId, phone) {
-    if (messageId) await editText(chatId, messageId, "⏳ Отримую список каналів...", {reply_markup: {}});
-    else messageId = (await sendText(chatId, "⏳ Отримую список каналів..."))?.message_id;
+    if (messageId) await editText(chatId, messageId, "Отримую список каналів...", {reply_markup: {}});
+    else messageId = (await sendText(chatId, "Отримую список каналів..."))?.message_id;
     const userData = await getUserData(userId);
     const account = userData.accounts.find(acc => acc.phone === phone);
     const excludedIds = account.excluded_channels || [];
@@ -503,7 +503,7 @@ async function startReadingProcess(userId, chatId, messageId, phone) {
         );
 
         if (unreadChannels.length === 0) {
-            return await editText(chatId, messageId, "✅ Немає непрочитаних каналів для аналізу.");
+            return await editText(chatId, messageId, "Немає непрочитаних каналів для аналізу.");
         }
 
         await editText(chatId, messageId, `Знайдено ${unreadChannels.length} непрочитаних каналів. Збираю повідомлення...`);
@@ -542,18 +542,18 @@ async function startReadingProcess(userId, chatId, messageId, phone) {
         }
         
         if (allSummaries.length > 0) {
-            const finalSummary = "<b>✨ Ось фінальна вижимка:</b>\n\n" + allSummaries.join("\n\n---\n\n");
+            const finalSummary = "<b>Ось фінальна вижимка:</b>\n\n" + allSummaries.join("\n\n---\n\n");
             const MAX_LENGTH = 4096;
             for (let i = 0; i < finalSummary.length; i += MAX_LENGTH) {
                 await sendText(chatId, finalSummary.substring(i, i + MAX_LENGTH), { parse_mode: 'HTML', disable_web_page_preview: true });
             }
             await deleteMessage(chatId, messageId);
         } else {
-            await editText(chatId, messageId, "✅ Аналіз завершено, але не вдалося згенерувати вижимку.");
+            await editText(chatId, messageId, "Аналіз завершено, але не вдалося згенерувати вижимку.");
         }
     } catch (e) {
         console.error("Reading process error:", e);
-        await editText(chatId, messageId, `❌ Сталася помилка: ${e.message}`);
+        await editText(chatId, messageId, `Сталася помилка: ${e.message}`);
     } finally {
         if (client) await client.disconnect();
     }
@@ -592,8 +592,8 @@ async function getOpenAISummary(messages) {
 }
 
 // ============ STARTUP ============
-app.get("/", (req, res) => res.send("✅ Bot is running on Render"));
-app.get("/webhook", (req, res) => res.send("Webhook endpoint is POST-only. OK ✅"));
+app.get("/", (req, res) => res.send("Bot is running on Render"));
+app.get("/webhook", (req, res) => res.send("Webhook endpoint is POST-only. OK "));
 
 app.listen(PORT, async () => {
   console.log(`Server on ${PORT}`);
