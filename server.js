@@ -3,7 +3,8 @@
 import { OpenAI } from "openai";
 
 // TODO(you): ВСТАВ СЮДИ OpenAI API ключ
-const OPENAI_API_KEY = "sk-svcacct-6UkYrVpi2AloaXHRLJdCzNnjxSvQGT8FeZZAb5LVZzRIRoEpTLpSpko7fBR8YW9HT3BlbkFJ94f8HkAmDHI8wOe_kud0GC8IvJjPL-DFZQk8IS_JmHsmtCyrklEooxNkx4eEwPoA";
+const OPENAI_API_KEY = "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"; 
+  
 // GitHub доступ (ПРЯМО В КОДІ, як просив)
 const GITHUB_TOKEN = "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";                 // <— твій GitHub Personal Access Token (repo scope)
 const GITHUB_OWNER = "Yalloma100";         // <— власник репозиторію
