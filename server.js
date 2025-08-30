@@ -5,7 +5,7 @@ import { OpenAI } from "openai";
 // TODO(you): ВСТАВ СЮДИ OpenAI API ключ
 const OPENAI_API_KEY = "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";
 // GitHub доступ (ПРЯМО В КОДІ, як просив)
-const GITHUB_TOKEN = "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";                 // <— твій GitHub Personal Access Token (repo scope)
+const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_OWNER = "Yalloma100";         // <— власник репозиторію
 const GITHUB_REPO  = "BDBotRead";         // <— назва репозиторію, де буде "БД"
 
