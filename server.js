@@ -32,7 +32,8 @@ if (OPENAI_API_KEY === "YOUR_OPENAI_API_KEY_HERE") {
 import express from "express";
 import axios from "axios";
 import { Octokit } from "@octokit/rest";
-import { TelegramClient, Api, events } from "telegram";
+import telegram from "telegram";
+const { TelegramClient, Api, events } = telegram;
 import { StringSession } from "telegram/sessions/index.js";
 import { Buffer } from "node:buffer";
 
