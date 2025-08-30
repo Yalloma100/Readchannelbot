@@ -32,8 +32,10 @@ if (OPENAI_API_KEY === "YOUR_OPENAI_API_KEY_HERE") {
 import express from "express";
 import axios from "axios";
 import { Octokit } from "@octokit/rest";
-import { TelegramClient, Api } from "telegram";
+import { TelegramClient, Api, events } from "telegram";
 import { StringSession } from "telegram/sessions/index.js";
+import { Buffer } from "node:buffer";
+
 
 // ============ GLOBALS ============
 const app = express();
@@ -44,6 +46,7 @@ const TELEGRAM_API = `https://api.telegram.org/bot${BOT_TOKEN}`;
 // Clients
 const octokit = new Octokit({ auth: GITHUB_TOKEN });
 const openai = new OpenAI({ apiKey: OPENAI_API_KEY });
+let trackingClient = null; // Client for tracking user updates
 
 // Зберігання станів діалогу в пам'яті
 const userState = new Map();
@@ -96,7 +99,9 @@ async function getAllUsersData() {
 
 async function getUserData(userId) {
     const allData = await getAllUsersData();
-    return allData[userId] || { accounts: [] };
+    const data = allData[userId] || { accounts: [], tracked_users: {} };
+    if (!data.tracked_users) data.tracked_users = {}; // Ensure tracked_users exists
+    return data;
 }
 
 async function saveUserData(userId, data) {
@@ -104,7 +109,6 @@ async function saveUserData(userId, data) {
     allData[String(userId)] = data;
     await ghWriteJson(FILE_USERS_DB, allData, `Update data for user ${userId}`);
 }
-
 
 // ============ TELEGRAM BOT HELPERS ============
 async function sendText(chat_id, text, extra = {}) {
@@ -257,6 +261,38 @@ async function cmdTestRead(msg) {
     }
 }
 
+// ============ USER TRACKING COMMANDS ============
+async function cmdStatus(msg) {
+    const userId = msg.from.id;
+    const userData = await getUserData(userId);
+    const trackedUsers = userData.tracked_users || {};
+    let text = "<b>Відстежувані користувачі:</b>\n\n";
+
+    if (Object.keys(trackedUsers).length === 0) {
+        text += "<i>Список порожній.</i>";
+    } else {
+        for (const trackedId in trackedUsers) {
+            const user = trackedUsers[trackedId];
+            const username = user.username ? `@${user.username}` : `ID: ${trackedId}`;
+            const status = user.last_known_status || 'невідомо';
+            text += `- <b>${escapeHtml(user.fullName || username)}</b> (Статус: ${status})\n`;
+        }
+    }
+
+    const keyboard = {
+        inline_keyboard: [
+            [
+                { text: "➕ Додати", callback_data: "track_add" },
+                { text: "➖ Видалити", callback_data: "track_delete_menu" },
+                { text: "✏️ Редагувати", callback_data: "track_edit_menu" }
+            ]
+        ]
+    };
+
+    await sendText(msg.chat.id, text, { reply_markup: keyboard });
+}
+
+
 // ============ WEBHOOK HANDLER ============
 app.post("/webhook", async (req, res) => {
     try {
@@ -282,6 +318,7 @@ async function handleMessage(msg) {
             case '/read': return cmdRead(msg);
             case '/transfer': return cmdTransfer(msg, args);
             case '/testread': return cmdTestRead(msg);
+            case '/status': return cmdStatus(msg); // New command
             default: return await sendText(chatId, "Невідома команда.");
         }
     }
@@ -327,15 +364,19 @@ async function handleMessage(msg) {
             await showExclusionList(userId, chatId, null, phone);
             break;
         case 'awaiting_exclusion_manual': {
-            const { phone } = state.data;
+            const { phone: manPhone } = state.data;
             if (text.toLowerCase() === 'завершити') {
                 userState.delete(userId);
                 await sendText(chatId, "Введення завершено.", { reply_markup: { remove_keyboard: true } });
-                return await showExclusionMenu(userId, chatId, null, phone);
+                return await showExclusionMenu(userId, chatId, null, manPhone);
             }
             const id = text.match(/-?\d{10,}/)?.[0] || text;
-            await addChannelToExclusions(userId, phone, id.toString());
+            await addChannelToExclusions(userId, manPhone, id.toString());
             await sendText(chatId, `ID <code>${escapeHtml(id)}</code> додано до виключень.`);
+            break;
+        }
+        case 'awaiting_user_to_track': {
+            await handleAddTrackedUser(userId, chatId, text);
             break;
         }
     }
@@ -345,6 +386,8 @@ async function handleCallbackQuery(callbackQuery) {
     const userId = callbackQuery.from.id, chatId = callbackQuery.message.chat.id, messageId = callbackQuery.message.message_id;
     const [action, payload] = callbackQuery.data.split(/:(.*)/s);
     await axios.post(`${TELEGRAM_API}/answerCallbackQuery`, { callback_query_id: callbackQuery.id });
+    
+    // Existing actions
     switch (action) {
         case 'add_account_start':
             userState.set(userId, { step: 'awaiting_phone' });
@@ -376,7 +419,35 @@ async function handleCallbackQuery(callbackQuery) {
             await startReadingProcess(userId, chatId, messageId, payload);
             break;
     }
-}
+    
+    // New tracking actions
+    switch (action) {
+        case 'track_add':
+            userState.set(userId, { step: 'awaiting_user_to_track' });
+            await editText(chatId, messageId, "Надішліть ID або юзернейм (@username) користувача для відстеження.", { reply_markup: {} });
+            break;
+        case 'track_delete_menu':
+        case 'track_edit_menu':
+            await showUserSelectionMenu(userId, chatId, messageId, action === 'track_delete_menu' ? 'delete' : 'edit');
+            break;
+        case 'track_select_for_delete':
+            await handleDeleteTrackedUser(userId, chatId, messageId, payload);
+            break;
+        case 'track_select_for_edit':
+            await showEditTrackingOptionsMenu(userId, chatId, messageId, payload);
+            break;
+        case 'track_toggle':
+            const [targetId, option] = payload.split(',');
+            await handleToggleTrackingOption(userId, chatId, messageId, targetId, option);
+            break;
+        case 'back_to_status_menu':
+             // Re-create the status message from scratch
+            await deleteMessage(chatId, messageId);
+            await cmdStatus({ from: { id: userId }, chat: { id: chatId } });
+            break;
+    }
+          }
+
 
 // ============ ЛОГІКА ІНТЕРАКТИВНИХ МЕНЮ ============
 async function showAccountStats(userId, chatId, messageId, phone) {
@@ -484,6 +555,141 @@ async function addChannelToExclusions(userId, phone, channelId) {
     }
 }
 
+
+// ============ USER TRACKING LOGIC ============
+
+async function handleAddTrackedUser(adminId, chatId, userInput) {
+    userState.delete(adminId);
+    await sendText(chatId, `Шукаю користувача: <code>${escapeHtml(userInput)}</code>...`);
+
+    if (!trackingClient || !trackingClient.connected) {
+        return await sendText(chatId, "Помилка: клієнт для відстеження не активний. Спробуйте пізніше.");
+    }
+
+    try {
+        const entity = await trackingClient.getEntity(userInput.startsWith('@') ? userInput : parseInt(userInput));
+        const targetId = entity.id.toString();
+
+        const adminData = await getUserData(adminId);
+        if (adminData.tracked_users[targetId]) {
+            return await sendText(chatId, "Цей користувач вже відстежується.");
+        }
+
+        const fullName = `${entity.firstName || ''} ${entity.lastName || ''}`.trim();
+        adminData.tracked_users[targetId] = {
+            id: targetId,
+            username: entity.username,
+            fullName: fullName,
+            bio: entity.about || '',
+            photoId: entity.photo?.photoId.toString(),
+            last_known_status: 'невідомо',
+            last_seen_timestamp: Date.now(),
+            history: [],
+            tracking_settings: {
+                name: true,
+                username: true,
+                bio: true,
+                photo: true,
+                status: true,
+            }
+        };
+
+        await saveUserData(adminId, adminData);
+        await sendText(chatId, `Користувача <b>${escapeHtml(fullName)}</b> (@${entity.username}) додано до списку відстеження.`);
+        await startTrackingUsers(); // Re-subscribe to updates with the new user
+    } catch (error) {
+        console.error("Failed to add tracked user:", error);
+        await sendText(chatId, "Не вдалося знайти користувача або сталася помилка.");
+    }
+}
+
+
+async function showUserSelectionMenu(userId, chatId, messageId, mode) {
+    const userData = await getUserData(userId);
+    const trackedUsers = userData.tracked_users || {};
+    
+    if (Object.keys(trackedUsers).length === 0) {
+        await editText(chatId, messageId, "Список відстеження порожній.", {
+             reply_markup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "back_to_status_menu" }]] }
+        });
+        return;
+    }
+    
+    const action = mode === 'delete' ? 'видалення' : 'редагування';
+    const callbackPrefix = mode === 'delete' ? 'track_select_for_delete' : 'track_select_for_edit';
+    
+    const buttons = Object.values(trackedUsers).map(user => {
+        const name = user.fullName || `@${user.username}` || `ID: ${user.id}`;
+        return [{ text: escapeHtml(name), callback_data: `${callbackPrefix}:${user.id}` }];
+    });
+
+    buttons.push([{ text: "⬅️ Назад", callback_data: "back_to_status_menu" }]);
+
+    await editText(chatId, messageId, `Оберіть користувача для ${action}:`, {
+        reply_markup: { inline_keyboard: buttons }
+    });
+}
+
+async function handleDeleteTrackedUser(adminId, chatId, messageId, targetId) {
+    const adminData = await getUserData(adminId);
+    if (adminData.tracked_users[targetId]) {
+        const userName = adminData.tracked_users[targetId].fullName || `@${adminData.tracked_users[targetId].username}`;
+        delete adminData.tracked_users[targetId];
+        await saveUserData(adminId, adminData);
+        await editText(chatId, messageId, `Користувача <b>${escapeHtml(userName)}</b> видалено зі списку.`, {
+            reply_markup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "back_to_status_menu" }]] }
+        });
+        await startTrackingUsers(); // Resubscribe without the removed user
+    } else {
+        await editText(chatId, messageId, "Помилка: користувача не знайдено.", {
+            reply_markup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "back_to_status_menu" }]] }
+        });
+    }
+}
+
+async function showEditTrackingOptionsMenu(userId, chatId, messageId, targetId) {
+    const userData = await getUserData(userId);
+    const userToEdit = userData.tracked_users[targetId];
+
+    if (!userToEdit) {
+        return await editText(chatId, messageId, "Помилка: користувача не знайдено.", {
+            reply_markup: { inline_keyboard: [[{ text: "⬅️ Назад", callback_data: "back_to_status_menu" }]] }
+        });
+    }
+
+    const s = userToEdit.tracking_settings;
+    const options = [
+        { name: "Ім'я/Прізвище", key: "name", enabled: s.name },
+        { name: "Юзернейм", key: "username", enabled: s.username },
+        { name: "Опис (Bio)", key: "bio", enabled: s.bio },
+        { name: "Фото", key: "photo", enabled: s.photo },
+        { name: "Статус (Онлайн)", key: "status", enabled: s.status },
+    ];
+    
+    const keyboard = options.map(opt => ([
+        { text: `${opt.enabled ? '✅' : '❌'} ${opt.name}`, callback_data: `track_toggle:${targetId},${opt.key}` }
+    ]));
+    keyboard.push([{ text: "⬅️ Назад до вибору", callback_data: "track_edit_menu" }]);
+    
+    const userName = userToEdit.fullName || `@${userToEdit.username}`;
+    await editText(chatId, messageId, `Налаштування відстеження для <b>${escapeHtml(userName)}</b>:`, {
+        reply_markup: { inline_keyboard: keyboard }
+    });
+}
+
+
+async function handleToggleTrackingOption(userId, chatId, messageId, targetId, optionKey) {
+    const userData = await getUserData(userId);
+    const userToEdit = userData.tracked_users[targetId];
+    if (userToEdit && userToEdit.tracking_settings.hasOwnProperty(optionKey)) {
+        userToEdit.tracking_settings[optionKey] = !userToEdit.tracking_settings[optionKey];
+        await saveUserData(userId, userData);
+        // Refresh the menu
+        await showEditTrackingOptionsMenu(userId, chatId, messageId, targetId);
+    }
+        }
+
+
 // ============ OpenAI ЛОГІКА ============
 async function startReadingProcess(userId, chatId, messageId, phone) {
     await editText(chatId, messageId, "Запуск процесу... (позначення прочитаним вимкнено)", {reply_markup:{}});
@@ -588,6 +794,137 @@ async function getOpenAISummary(messages) {
     }
 }
 
+// ============ BACKGROUND TRACKING ============
+
+async function updateHandler(update) {
+    if (update instanceof Api.UpdateUserStatus) {
+        const targetId = update.userId.toString();
+        let status;
+        if (update.status instanceof Api.UserStatusOnline) {
+             status = `онлайн (до ${new Date(update.status.expires * 1000).toLocaleTimeString()})`;
+        } else if (update.status instanceof Api.UserStatusOffline) {
+            status = `офлайн (був(ла) ${new Date(update.status.wasOnline * 1000).toLocaleString()})`;
+        } else {
+            status = 'нещодавно';
+        }
+        await checkAndUpdateUser(targetId, { last_known_status: status });
+
+    } else if (update instanceof Api.UpdateUser) {
+        const targetId = update.userId.toString();
+        const user = update.user;
+        const newFullName = `${user.firstName || ''} ${user.lastName || ''}`.trim();
+
+        await checkAndUpdateUser(targetId, {
+            username: user.username,
+            fullName: newFullName,
+            photoId: user.photo?.photoId.toString()
+        });
+    } else if (update.class === "UpdateShort" && update.update?.userId) {
+        // This can also contain user updates
+        const targetId = update.update.userId.toString();
+        await checkAndUpdateUser(targetId, {}); // General check
+    }
+}
+
+async function checkAndUpdateUser(targetId, newData) {
+    const allUsersData = await getAllUsersData();
+    for (const adminId in allUsersData) {
+        const adminData = allUsersData[adminId];
+        if (adminData.tracked_users && adminData.tracked_users[targetId]) {
+            const trackedUser = adminData.tracked_users[targetId];
+            const settings = trackedUser.tracking_settings;
+            let changes = [];
+            
+            // Fetch full entity for more details
+            let fullUser;
+            try {
+                if(trackingClient && trackingClient.connected) {
+                    fullUser = await trackingClient.invoke(new Api.users.GetFullUser({id: targetId}));
+                }
+            } catch (e) { console.error("Could not get full user for update:", e.message); }
+
+            const newBio = fullUser ? fullUser.fullUser.about : null;
+
+            if (settings.name && newData.fullName && trackedUser.fullName !== newData.fullName) {
+                changes.push(`Ім'я: <code>${escapeHtml(trackedUser.fullName)}</code> → <code>${escapeHtml(newData.fullName)}</code>`);
+                trackedUser.fullName = newData.fullName;
+            }
+            if (settings.username && newData.username !== undefined && trackedUser.username !== newData.username) {
+                changes.push(`Юзернейм: @${escapeHtml(trackedUser.username)} → @${escapeHtml(newData.username)}`);
+                trackedUser.username = newData.username;
+            }
+            if (settings.photo && newData.photoId && trackedUser.photoId !== newData.photoId) {
+                changes.push(`Фото оновлено.`);
+                trackedUser.photoId = newData.photoId;
+            }
+            if (settings.status && newData.last_known_status && trackedUser.last_known_status !== newData.last_known_status) {
+                 changes.push(`Статус: ${escapeHtml(newData.last_known_status)}`);
+                 trackedUser.last_known_status = newData.last_known_status;
+            }
+            if (settings.bio && newBio !== null && trackedUser.bio !== newBio) {
+                changes.push(`Опис: <code>${escapeHtml(trackedUser.bio)}</code> → <code>${escapeHtml(newBio)}</code>`);
+                trackedUser.bio = newBio;
+            }
+            
+            if (changes.length > 0) {
+                const userName = trackedUser.fullName || `@${trackedUser.username}`;
+                const notification = `<b>Оновлення для ${escapeHtml(userName)}:</b>\n\n${changes.join('\n')}`;
+                await sendText(adminId, notification);
+                trackedUser.history.push({ timestamp: new Date().toISOString(), changes: changes.join(', ') });
+                await saveUserData(adminId, adminData);
+            }
+        }
+    }
+}
+
+async function startTrackingUsers() {
+    if (trackingClient && trackingClient.connected) {
+        console.log("Disconnecting existing tracking client to re-subscribe...");
+        trackingClient.removeEventHandler(updateHandler);
+        await trackingClient.disconnect();
+        trackingClient = null;
+    }
+
+    const adminData = await getUserData(ADMIN_ID);
+    if (!adminData.accounts || adminData.accounts.length === 0) {
+        console.log("No accounts found for admin, tracking disabled.");
+        return;
+    }
+    
+    const sessionToUse = adminData.accounts[0].session;
+    trackingClient = await connectWithSession(sessionToUse);
+
+    if (trackingClient) {
+        console.log(`Tracking client connected using account ${adminData.accounts[0].phone}.`);
+        trackingClient.addEventHandler(updateHandler, new events.Raw());
+        
+        const allUsersData = await getAllUsersData();
+        let allTrackedIds = new Set();
+        for (const userId in allUsersData) {
+            const userData = allUsersData[userId];
+            if (userData.tracked_users) {
+                Object.keys(userData.tracked_users).forEach(id => allTrackedIds.add(id));
+            }
+        }
+        
+        if (allTrackedIds.size > 0) {
+            console.log(`Subscribing to updates for ${allTrackedIds.size} users.`);
+            try {
+                // This doesn't actively subscribe but ensures we get updates for contacts/dialogs.
+                // The event handler will catch any update that the library receives.
+                await trackingClient.invoke(new Api.users.GetUsers({ id: Array.from(allTrackedIds) }));
+                 console.log('Successfully fetched tracked users to get updates.');
+            } catch (e) {
+                console.error("Could not initially fetch tracked users:", e.message);
+            }
+        } else {
+            console.log("No users to track.");
+        }
+    } else {
+        console.error("Failed to connect tracking client.");
+    }
+}
+
 // ============ STARTUP ============
 app.get("/", (req, res) => res.send("Bot is running on Render"));
 app.get("/webhook", (req, res) => res.send("Webhook endpoint is POST-only. OK"));
@@ -597,8 +934,9 @@ app.listen(PORT, async () => {
   try {
     await ensureDbFile();
     console.log("Database file checked/initialized.");
+    await startTrackingUsers(); // Start the tracking client
   } catch (e) {
-    console.error("GitHub DB init error:", e?.message || e);
+    console.error("GitHub DB init or Tracking Start error:", e?.message || e);
   }
   const host = process.env.RENDER_EXTERNAL_HOSTNAME;
   if (host) {
