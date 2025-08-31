@@ -4,7 +4,7 @@ import { OpenAI } from "openai";
 
 // TODO(you): ВСТАВ СЮДИ OpenAI API ключ
 const OPENAI_API_KEY = "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";
-// GitHub доступ (ПРЯМО В КОДІ, як просив)
+// GitHub доступ (беремо з безпечних змінних оточення)
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
 const GITHUB_OWNER = "Yalloma100";         // <— власник репозиторію
 const GITHUB_REPO  = "BDBotRead";         // <— назва репозиторію, де буде "БД"
@@ -20,8 +20,8 @@ const BOT_TOKEN = "8285002916:AAHZJXjZgT1G9RxV2bjqLgGnaC73iDWhKT4";   // BotFath
 const API_ID = 27340376;
 const API_HASH = "d0e2e0d908496af978537c1ac918bdab";
 
-if (!BOT_TOKEN || !API_ID || !API_HASH) {
-  console.error("❌ Set BOT_TOKEN, API_ID, API_HASH env vars!");
+if (!BOT_TOKEN || !API_ID || !API_HASH || !GITHUB_TOKEN) {
+  console.error("❌ Set BOT_TOKEN, API_ID, API_HASH, GITHUB_TOKEN env vars!");
   process.exit(1);
 }
 if (OPENAI_API_KEY === "YOUR_OPENAI_API_KEY_HERE") {
@@ -32,9 +32,10 @@ if (OPENAI_API_KEY === "YOUR_OPENAI_API_KEY_HERE") {
 import express from "express";
 import axios from "axios";
 import { Octokit } from "@octokit/rest";
+// ФІНАЛЬНЕ ВИПРАВЛЕННЯ ІМПОРТУ TELEGRAM
 import telegram from "telegram";
-const { TelegramClient, Api, events } = telegram;
-import { StringSession } from "telegram/sessions/index.js";
+const { TelegramClient, Api, events, sessions } = telegram;
+const { StringSession } = sessions;
 import { Buffer } from "node:buffer";
 
 
@@ -193,6 +194,7 @@ async function connectWithSession(sessionString) {
     return null;
   }
 }
+
 
 // ============ COMMANDS & LOGIC ============
 async function cmdStart(msg) {
@@ -383,6 +385,8 @@ async function handleMessage(msg) {
     }
 }
 
+
+
 async function handleCallbackQuery(callbackQuery) {
     const userId = callbackQuery.from.id, chatId = callbackQuery.message.chat.id, messageId = callbackQuery.message.message_id;
     const [action, payload] = callbackQuery.data.split(/:(.*)/s);
@@ -447,8 +451,7 @@ async function handleCallbackQuery(callbackQuery) {
             await cmdStatus({ from: { id: userId }, chat: { id: chatId } });
             break;
     }
-          }
-
+}
 
 // ============ ЛОГІКА ІНТЕРАКТИВНИХ МЕНЮ ============
 async function showAccountStats(userId, chatId, messageId, phone) {
@@ -555,6 +558,8 @@ async function addChannelToExclusions(userId, phone, channelId) {
         }
     }
 }
+
+
 
 
 // ============ USER TRACKING LOGIC ============
@@ -685,11 +690,9 @@ async function handleToggleTrackingOption(userId, chatId, messageId, targetId, o
     if (userToEdit && userToEdit.tracking_settings.hasOwnProperty(optionKey)) {
         userToEdit.tracking_settings[optionKey] = !userToEdit.tracking_settings[optionKey];
         await saveUserData(userId, userData);
-        // Refresh the menu
         await showEditTrackingOptionsMenu(userId, chatId, messageId, targetId);
     }
-        }
-
+}
 
 // ============ OpenAI ЛОГІКА ============
 async function startReadingProcess(userId, chatId, messageId, phone) {
@@ -798,33 +801,38 @@ async function getOpenAISummary(messages) {
 // ============ BACKGROUND TRACKING ============
 
 async function updateHandler(update) {
-    if (update instanceof Api.UpdateUserStatus) {
-        const targetId = update.userId.toString();
-        let status;
-        if (update.status instanceof Api.UserStatusOnline) {
-             status = `онлайн (до ${new Date(update.status.expires * 1000).toLocaleTimeString()})`;
-        } else if (update.status instanceof Api.UserStatusOffline) {
-            status = `офлайн (був(ла) ${new Date(update.status.wasOnline * 1000).toLocaleString()})`;
-        } else {
-            status = 'нещодавно';
+    (async () => {
+        try {
+            if (update instanceof Api.UpdateUserStatus) {
+                const targetId = update.userId.toString();
+                let status;
+                if (update.status instanceof Api.UserStatusOnline) {
+                     status = `онлайн (до ${new Date(update.status.expires * 1000).toLocaleTimeString()})`;
+                } else if (update.status instanceof Api.UserStatusOffline) {
+                    status = `офлайн (був(ла) ${new Date(update.status.wasOnline * 1000).toLocaleString()})`;
+                } else {
+                    status = 'нещодавно';
+                }
+                await checkAndUpdateUser(targetId, { last_known_status: status });
+
+            } else if (update instanceof Api.UpdateUser) {
+                const targetId = update.userId.toString();
+                const user = update.user;
+                const newFullName = `${user.firstName || ''} ${user.lastName || ''}`.trim();
+
+                await checkAndUpdateUser(targetId, {
+                    username: user.username,
+                    fullName: newFullName,
+                    photoId: user.photo?.photoId.toString()
+                });
+            } else if (update.class === "UpdateShort" && update.update?.userId) {
+                const targetId = update.update.userId.toString();
+                await checkAndUpdateUser(targetId, {});
+            }
+        } catch (e) {
+            console.error("Error inside background update handler:", e);
         }
-        await checkAndUpdateUser(targetId, { last_known_status: status });
-
-    } else if (update instanceof Api.UpdateUser) {
-        const targetId = update.userId.toString();
-        const user = update.user;
-        const newFullName = `${user.firstName || ''} ${user.lastName || ''}`.trim();
-
-        await checkAndUpdateUser(targetId, {
-            username: user.username,
-            fullName: newFullName,
-            photoId: user.photo?.photoId.toString()
-        });
-    } else if (update.class === "UpdateShort" && update.update?.userId) {
-        // This can also contain user updates
-        const targetId = update.update.userId.toString();
-        await checkAndUpdateUser(targetId, {}); // General check
-    }
+    })();
 }
 
 async function checkAndUpdateUser(targetId, newData) {
@@ -836,7 +844,6 @@ async function checkAndUpdateUser(targetId, newData) {
             const settings = trackedUser.tracking_settings;
             let changes = [];
             
-            // Fetch full entity for more details
             let fullUser;
             try {
                 if(trackingClient && trackingClient.connected) {
@@ -881,7 +888,7 @@ async function checkAndUpdateUser(targetId, newData) {
 async function startTrackingUsers() {
     if (trackingClient && trackingClient.connected) {
         console.log("Disconnecting existing tracking client to re-subscribe...");
-        trackingClient.removeEventHandler(updateHandler);
+        trackingClient.removeEventHandler(updateHandler, new events.Raw({}));
         await trackingClient.disconnect();
         trackingClient = null;
     }
@@ -897,7 +904,7 @@ async function startTrackingUsers() {
 
     if (trackingClient) {
         console.log(`Tracking client connected using account ${adminData.accounts[0].phone}.`);
-        trackingClient.addEventHandler(updateHandler, new events.Raw());
+        trackingClient.addEventHandler(updateHandler, new events.Raw({}));
         
         const allUsersData = await getAllUsersData();
         let allTrackedIds = new Set();
@@ -911,8 +918,6 @@ async function startTrackingUsers() {
         if (allTrackedIds.size > 0) {
             console.log(`Subscribing to updates for ${allTrackedIds.size} users.`);
             try {
-                // This doesn't actively subscribe but ensures we get updates for contacts/dialogs.
-                // The event handler will catch any update that the library receives.
                 await trackingClient.invoke(new Api.users.GetUsers({ id: Array.from(allTrackedIds) }));
                  console.log('Successfully fetched tracked users to get updates.');
             } catch (e) {
